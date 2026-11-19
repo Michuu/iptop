@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="520" height="168" viewBox="0 0 520 168" role="img" aria-label="iptop">
+  <defs>
+    <linearGradient id="rx" gradientUnits="userSpaceOnUse" x1="0" y1="84" x2="0" y2="24">
+      <stop offset="0" stop-color="#50c878"/>
+      <stop offset="0.55" stop-color="#e6c846"/>
+      <stop offset="1" stop-color="#f05a5a"/>
+    </linearGradient>
+    <linearGradient id="tx" gradientUnits="userSpaceOnUse" x1="0" y1="84" x2="0" y2="112">
+      <stop offset="0" stop-color="#5ab4eb"/>
+      <stop offset="0.55" stop-color="#8278f5"/>
+      <stop offset="1" stop-color="#e164dc"/>
+    </linearGradient>
+  </defs>
+  <rect x="0.5" y="0.5" width="519" height="167" rx="22" fill="#1a1b26" stroke="#3b4261"/>
+  <rect x="18" y="18" width="182" height="132" rx="14" fill="#16161e" stroke="#2f3549"/>
+  <line x1="28" y1="84" x2="190" y2="84" stroke="#2f3549" stroke-width="1"/>
+  <rect x="34" y="74" width="6" height="8" rx="1.5" fill="url(#rx)"/><rect x="34" y="86" width="6" height="4" rx="1.5" fill="url(#tx)"/><rect x="44" y="68" width="6" height="14" rx="1.5" fill="url(#rx)"/><rect x="44" y="86" width="6" height="7" rx="1.5" fill="url(#tx)"/><rect x="54" y="60" width="6" height="22" rx="1.5" fill="url(#rx)"/><rect x="54" y="86" width="6" height="10" rx="1.5" fill="url(#tx)"/><rect x="64" y="64" width="6" height="18" rx="1.5" fill="url(#rx)"/><rect x="64" y="86" width="6" height="8" rx="1.5" fill="url(#tx)"/><rect x="74" y="52" width="6" height="30" rx="1.5" fill="url(#rx)"/><rect x="74" y="86" width="6" height="13" rx="1.5" fill="url(#tx)"/><rect x="84" y="40" width="6" height="42" rx="1.5" fill="url(#rx)"/><rect x="84" y="86" width="6" height="18" rx="1.5" fill="url(#tx)"/><rect x="94" y="28" width="6" height="54" rx="1.5" fill="url(#rx)"/><rect x="94" y="86" width="6" height="22" rx="1.5" fill="url(#tx)"/><rect x="104" y="36" width="6" height="46" rx="1.5" fill="url(#rx)"/><rect x="104" y="86" width="6" height="17" rx="1.5" fill="url(#tx)"/><rect x="114" y="46" width="6" height="36" rx="1.5" fill="url(#rx)"/><rect x="114" y="86" width="6" height="13" rx="1.5" fill="url(#tx)"/><rect x="124" y="34" width="6" height="48" rx="1.5" fill="url(#rx)"/><rect x="124" y="86" width="6" height="19" rx="1.5" fill="url(#tx)"/><rect x="134" y="24" width="6" height="58" rx="1.5" fill="url(#rx)"/><rect x="134" y="86" width="6" height="24" rx="1.5" fill="url(#tx)"/><rect x="144" y="42" width="6" height="40" rx="1.5" fill="url(#rx)"/><rect x="144" y="86" width="6" height="15" rx="1.5" fill="url(#tx)"/><rect x="154" y="54" width="6" height="28" rx="1.5" fill="url(#rx)"/><rect x="154" y="86" width="6" height="11" rx="1.5" fill="url(#tx)"/><rect x="164" y="62" width="6" height="20" rx="1.5" fill="url(#rx)"/><rect x="164" y="86" width="6" height="8" rx="1.5" fill="url(#tx)"/><rect x="174" y="70" width="6" height="12" rx="1.5" fill="url(#rx)"/><rect x="174" y="86" width="6" height="5" rx="1.5" fill="url(#tx)"/>
+  <text x="226" y="98" font-family="'JetBrains Mono','Fira Code','DejaVu Sans Mono',Menlo,Consolas,monospace" font-size="76" font-weight="700" letter-spacing="-1"><tspan fill="#7aa2f7">ip</tspan><tspan fill="#c0caf5">top</tspan></text>
+  <text x="229" y="132" font-family="'JetBrains Mono','Fira Code','DejaVu Sans Mono',Menlo,Consolas,monospace" font-size="16" fill="#737aa2">per-host bandwidth monitor</text>
+</svg>

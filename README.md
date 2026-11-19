@@ -1,66 +1,38 @@
 <div align="center">
 
-```
-              _       _
-             (_)_ __ | |_ ___  _ __
-             | | '_ \| __/ _ \| '_ \          .--------.
-             | | |_) | || (_) | |_) |        /  ⊙    ⊙  \    "who is using
-             |_| .__/ \__\___/| .__/        |    ‿‿‿    |    all the bandwidth?"
-               |_|            |_|            \  ⇄ ⇄ ⇄  /
-                                              '--------'
-         ⣀⣠⣤⣶⣿⣷⣦⣄⣀⡀  ⢀⣀⣤⣶⣿⣿⣶⣤⣀  ⣀⣤⣴⣶⣦⣤⣀⡀⢀⣀⣤⣶⣾⣿⣷⣶⣤⣀  ⣀⣠⣴⣶⣦⣄⣀
-         ⠉⠛⠻⠿⣿⠿⠟⠋⠉⠁  ⠈⠉⠛⠿⣿⣿⠿⠛⠉  ⠉⠛⠻⠿⠟⠛⠉⠁⠈⠉⠛⠿⢿⣿⡿⠿⠛⠉  ⠉⠙⠻⠿⠟⠋⠉
-```
+<img src="assets/logo.svg" alt="iptop" width="520">
 
-**iftop, but it went to the gym and discovered colours.**
-
-*iptop is to iftop what btop is to top.*
+A modern per-host network bandwidth monitor for the terminal.<br>
+What btop is to top, iptop aims to be to iftop.
 
 </div>
 
 ---
 
-iptop is a terminal bandwidth monitor written in Rust. It shows **who your machine is talking to,
-how fast, and where in the world they are**, with braille graphs, sparklines, GeoIP and ASN.
-It also keeps iftop's muscle memory: if you know iftop's keys, you already know iptop.
+iptop shows which hosts your machine is talking to, how much traffic each one carries, and where
+they are (GeoIP and ASN). It keeps iftop's key bindings and adds braille graphs, sparklines,
+filters that apply to past traffic as well as new, an interface picker, and a per-host panel that
+runs ping and traceroute.
 
-```
- iptop  ⇄ enp1s0 │ external only                                              ⟳ 1s │ one-line │ sort 2s │ 13:37:00
-╭ traffic · last 3m ───────────────────────────────────────────────────╮╭ totals ──────────────────────╮
-│ ↓ RX  48.2Mb/s                                       ⣀⣠⣤⣴⣶⣾⣿⣷⣶⣦⣤⡀    ││ ↓ RX 2s             31.4Mb    │
-│                                       ⢀⣀⣠⣤⣴⣶⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣦⣄⣀ ││   10/40s     28.9Mb/22.0Mb    │
-│ ⣀⣀⣀⣀⣠⣤⣤⣤⣴⣶⣶⣶⣶⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿ ││   peak              48.2Mb    │
-│ ⠉⠉⠉⠉⠉⠙⠛⠛⠛⠛⠻⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿⢿⣿⣿⣿⣿⣿⡿⠿⠿⠿⠿⠿⠿⠛⠛⠛⠛⠋⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉ ││ ↑ TX 2s             4.12Mb    │
-│ ↑ TX  9.80Mb/s                     ⠈⠛⠿⠟⠋                                  ││ 4210 pkt/s  87 flows          │
-╰──────────────────────────────────────────────────────────────────────╯╰───────────────────────────────╯
-╭ hosts 23 ──────────────────────────────────────────────────────────────────────────────────────────────╮
-│  local          remote                    geo / asn              last 32s           2s     10s   total │
-│▌ myserver     ⇄ mirror.example.org        DE AS24940 Hetzner     ▂▃▅▆▇██▇▇█      21.3Mb  19.8Mb  1.2GB │
-│  myserver     ⇄ 203.0.113.42              US AS15169 Google LLC  ▁▁▂▂▃▃▂▂▃▅      6.40Mb  5.11Mb   310MB │
-│  myserver     ⇄ cdn.example.net           PL AS13335 Cloudflare  ····▁▃█▅▂▁      1.02Mb   880Kb  41.0MB │
-│  myserver     ⇄ 198.51.100.7              NL AS1136 KPN          █▇▅▃▂▁····        12Kb   402Kb  9.71MB │
-╰────────────────────────────────────────────────────────────────────────────── bars 2s log · bits ──╯
- h help  ⏎ host  i iface  x scope  f filter  l search  t lines  p ports  s/d aggr  G geo  P pause  q quit
-```
-<sub>(illustrative: the real thing has more colour gradients than markdown can hold)</sub>
+<!-- TODO: screenshot -->
 
 ## Features
 
-- 🦀 **Rust, no libpcap.** It reads packets from a raw Linux `AF_PACKET` socket. The kernel tells
+- **Rust, no libpcap.** It reads packets from a raw Linux `AF_PACKET` socket. The kernel tells
   us whether each packet was sent or received, which works on `any`, `tun` and `wg` interfaces too.
-- ⌨️ **iftop keys**: `n N s d S D p t 1 2 3 < > o b B L T P l f j k q` behave as you expect.
+- **iftop keys**: `n N s d S D p t 1 2 3 < > o b B L T P l f j k q` behave as you expect.
   One line per host pair is the default, so you don't need to press `t` every time.
-- 📈 **btop-style display**: a mirrored braille RX/TX graph, gradient sparklines per host,
+- **btop-style display**: a mirrored braille RX/TX graph, gradient sparklines per host,
   bars that show the RX/TX split, an adjustable update rate (`+`/`-`) and adjustable averaging
   windows (`w`).
-- 🌍 **GeoIP + ASN** from MaxMind `.mmdb` files (GeoLite2 City/ASN, or ones patched with your own networks).
-- 🔬 **Host panel** (Enter or click): live ping with a loss graph, a traceroute where every hop
+- **GeoIP + ASN** from MaxMind `.mmdb` files (GeoLite2 City/ASN, or ones patched with your own networks).
+- **Host panel** (Enter or click): live ping with a loss graph, a traceroute where every hop
   gets geo and ASN, the host's traffic graph, and its individual flows.
-- 🧹 **Filters that are applied to history:** a BPF-ish filter language (`f`), a quick screen
+- **Filters that are applied to history:** a BPF-ish filter language (`f`), a quick screen
   search (`/`), and an *external only* scope (`x`). Change them and the whole view, graph
   included, updates immediately.
-- 🔌 **Interface picker** (`i`, or `[` / `]`) with live rates per interface.
-- 🐁 Mouse support: wheel to scroll, click to select, click again for the host panel.
+- **Interface picker** (`i`, or `[` / `]`) with live rates per interface.
+- **Mouse support:** wheel to scroll, click to select, click again for the host panel.
 
 ## Install
 
@@ -160,7 +132,6 @@ src/resolver.rs  async reverse DNS
 ## Credits
 
 Inspired by [iftop](https://pdw.ex-parrot.com/iftop/) by Paul Warren and Chris Lightfoot, and
-[btop](https://github.com/aristocratos/btop). No packets were harmed in the making of this tool;
-they were only counted.
+[btop](https://github.com/aristocratos/btop).
 
 License: GPL-2.0-or-later.
