@@ -43,12 +43,14 @@ Each release has static Linux binaries (musl, no dependencies):
 | `iptop-vX.Y.Z-x86_64-linux.tar.gz` | PCs and servers, Intel or AMD |
 | `iptop-vX.Y.Z-aarch64-linux.tar.gz` | Raspberry Pi 4 / 5 with a 64-bit OS, other ARM64 boards |
 | `iptop-vX.Y.Z-armv7-linux.tar.gz` | Raspberry Pi 2 / 3 / 4 with a 32-bit OS |
+| `iptop-vX.Y.Z-armv6-linux.tar.gz` | Raspberry Pi Zero / Zero W / 1 |
+| `iptop-vX.Y.Z-riscv64-linux.tar.gz` | 64-bit RISC-V boards |
 
-On a Pi, `uname -m` tells you which one you need: `aarch64` or `armv7l`.
+On a Pi, `uname -m` tells you which one you need: `aarch64`, `armv7l` or `armv6l`.
 
 ```sh
-tar xzf iptop-v0.1.0-x86_64-linux.tar.gz
-sudo install -m755 iptop-v0.1.0-x86_64-linux/iptop /usr/local/bin/
+tar xzf iptop-v0.1.2-x86_64-linux.tar.gz
+sudo install -m755 iptop-v0.1.2-x86_64-linux/iptop /usr/local/bin/
 ```
 
 ## Build from source

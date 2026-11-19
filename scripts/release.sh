@@ -9,7 +9,9 @@ rm -rf dist && mkdir -p dist
 for pair in \
     x86_64-unknown-linux-musl:x86_64-linux \
     aarch64-unknown-linux-musl:aarch64-linux \
-    armv7-unknown-linux-musleabihf:armv7-linux
+    armv7-unknown-linux-musleabihf:armv7-linux \
+    arm-unknown-linux-musleabihf:armv6-linux \
+    riscv64gc-unknown-linux-musl:riscv64-linux
 do
     triple=${pair%%:*}; name=${pair##*:}
     cargo zigbuild --release --target "$triple"
