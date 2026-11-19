@@ -67,6 +67,9 @@ pub struct Args {
     /// GeoIP .mmdb file or directory (default: ~/geoip-*/mmdb, ~/geoip-*, /usr/share/GeoIP, ...)
     #[arg(long)]
     pub geoip: Option<String>,
+    /// Geo column: short, org, asn, place, full, off (key G cycles)
+    #[arg(long, value_name = "FMT", default_value = "short")]
+    pub geo_format: String,
 }
 
 fn main() -> anyhow::Result<()> {

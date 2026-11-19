@@ -2,6 +2,7 @@
 
 use crate::app::{App, InputKind, LineMode, Popup, Row, Sort, SPARK};
 use crate::filter::Scope;
+use crate::geo::GeoFmt;
 use crate::util::{self, fit, fmt_bytes, fmt_dur, fmt_rate, has_ports};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -88,7 +89,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_host(f, area, app);
     }
     match app.popup {
-        Popup::Help => draw_help(f, area),
+        Popup::Help => {
+            app.popup_area = None;
+            draw_help(f, area)
+        }
         Popup::Ifaces => draw_ifaces(f, area, app),
         Popup::None => {}
     }
@@ -352,7 +356,8 @@ fn columns(inner: Rect, app: &App) -> Cols {
     let ncols = if app.show_totals { 4 } else { 3 };
     let nums = num_w * ncols;
     let spark_w = if w > 120 { SPARK } else if w > 95 { 16 } else { 0 };
-    let geo_w = if !app.show_geo || w < 90 { 0 } else if w > 150 { 30 } else { 20 };
+    let wide = if app.geo_fmt == GeoFmt::Full { 40 } else { 30 };
+    let geo_w = if app.geo_fmt == GeoFmt::Off || w < 90 { 0 } else if w > 150 { wide } else { 20 };
     let fixed = 2 + nums + if spark_w > 0 { spark_w + 2 } else { 0 } + if geo_w > 0 { geo_w + 1 } else { 0 };
     let label_w = w.saturating_sub(fixed).max(10);
     let label_x = inner.x + 2;
@@ -415,7 +420,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
     };
     buf.set_stringn(c.label_x, inner.y, &label_hdr, c.label_w, hs);
     if c.geo_w > 0 {
-        buf.set_stringn(c.geo_x, inner.y, "geo / asn", c.geo_w, hs);
+        buf.set_stringn(c.geo_x, inner.y, app.geo_fmt.header(), c.geo_w, hs);
     }
     if c.spark_w > 0 {
         buf.set_stringn(c.spark_x, inner.y, format!("last {}s", c.spark_w), c.spark_w, hs);
@@ -637,7 +642,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
                 ("i  [  ]", "interface picker / previous / next interface"),
                 ("x", "scope: all → external only → internal only"),
                 ("F", "clear filter and search"),
-                ("G", "toggle geo / ASN column"),
+                ("G", "geo column: AS+org → org → AS → city → city+AS → off"),
                 ("g", "toggle traffic graph"),
                 ("+ / -", "update interval 100ms … 10s (like btop)"),
                 ("w", "averaging windows 1/5/20 · 2/10/40 · 5/30/120 · 10/60/300 s"),
@@ -676,21 +681,35 @@ fn draw_help(f: &mut Frame, area: Rect) {
     );
 }
 
-fn draw_ifaces(f: &mut Frame, area: Rect, app: &App) {
-    let h = app.ifaces.len() as u16 + 3;
-    let r = centered(area, 84, h.max(6));
+fn draw_ifaces(f: &mut Frame, area: Rect, app: &mut App) {
+    let n = app.ifaces.len();
+    let h = n as u16 + 3;
+    let r = centered(area, 84, h.max(6).min(area.height.saturating_sub(2)));
+    app.popup_area = Some((r.x, r.y, r.width, r.height));
     f.render_widget(Clear, r);
-    let block = panel(title("interfaces")).title_bottom(Line::from(" ⏎ switch · esc close ").right_aligned());
+    // Rows that fit under the header; keep the selection in view.
+    let vis = r.height.saturating_sub(3) as usize;
+    if app.iface_sel < app.iface_off {
+        app.iface_off = app.iface_sel;
+    } else if vis > 0 && app.iface_sel >= app.iface_off + vis {
+        app.iface_off = app.iface_sel + 1 - vis;
+    }
+    app.iface_off = app.iface_off.min(n.saturating_sub(vis));
+    let pos = if n > vis { format!(" {}/{} ·", app.iface_sel + 1, n) } else { String::new() };
+    let block = panel(title("interfaces"))
+        .title_bottom(Line::from(format!("{pos} ⏎/click switch · esc close ")).right_aligned());
     let inner = block.inner(r);
     f.render_widget(block, r);
+    app.iface_hits.clear();
     let buf = f.buffer_mut();
     let hs = Style::new().fg(DIM).bold();
     buf.set_string(inner.x + 2, inner.y, format!("{:<16} {:<8} {:>9} {:>9}  addresses", "name", "state", "↓ rx", "↑ tx"), hs);
-    for (i, e) in app.ifaces.iter().enumerate() {
-        let y = inner.y + 1 + i as u16;
+    for (i, e) in app.ifaces.iter().enumerate().skip(app.iface_off) {
+        let y = inner.y + 1 + (i - app.iface_off) as u16;
         if y >= inner.y + inner.height {
             break;
         }
+        app.iface_hits.push((y, i));
         let sel = i == app.iface_sel;
         if sel {
             buf.set_style(Rect::new(inner.x, y, inner.width, 1), Style::new().bg(SEL_BG));

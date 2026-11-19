@@ -80,8 +80,100 @@ impl GeoInfo {
         }
     }
 
+    /// "Warsaw, PL" (falls back to the country name, then the code).
+    pub fn city_cc(&self) -> String {
+        match (&self.city, &self.cc, &self.country) {
+            (Some(c), Some(cc), _) => format!("{c}, {cc}"),
+            (Some(c), None, _) => c.clone(),
+            (None, _, Some(n)) => n.clone(),
+            (None, Some(cc), None) => cc.clone(),
+            (None, None, None) => String::new(),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.cc.is_none() && self.city.is_none() && self.asn.is_none() && self.as_org.is_none()
+    }
+}
+
+/// How the geo column renders a `GeoInfo` (cycled with `G`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GeoFmt {
+    Off,
+    /// "PL AS8501 PSNC"
+    Short,
+    /// "PL PSNC"
+    Org,
+    /// "PL AS8501"
+    Asn,
+    /// "Warsaw, PL"
+    Place,
+    /// "Warsaw, PL · AS8501 PSNC"
+    Full,
+}
+
+impl GeoFmt {
+    pub const ALL: [GeoFmt; 6] = [GeoFmt::Short, GeoFmt::Org, GeoFmt::Asn, GeoFmt::Place, GeoFmt::Full, GeoFmt::Off];
+
+    pub fn parse(s: &str) -> Option<GeoFmt> {
+        Some(match s {
+            "off" | "none" => GeoFmt::Off,
+            "short" => GeoFmt::Short,
+            "org" => GeoFmt::Org,
+            "asn" => GeoFmt::Asn,
+            "place" | "city" => GeoFmt::Place,
+            "full" => GeoFmt::Full,
+            _ => return None,
+        })
+    }
+
+    pub fn next(self) -> GeoFmt {
+        let i = Self::ALL.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            GeoFmt::Off => "off",
+            GeoFmt::Short => "country + AS + org",
+            GeoFmt::Org => "country + org",
+            GeoFmt::Asn => "country + AS number",
+            GeoFmt::Place => "city, country",
+            GeoFmt::Full => "city, country + AS + org",
+        }
+    }
+
+    /// Column header.
+    pub fn header(self) -> &'static str {
+        match self {
+            GeoFmt::Off => "",
+            GeoFmt::Short => "geo / asn",
+            GeoFmt::Org => "geo / org",
+            GeoFmt::Asn => "geo / asn",
+            GeoFmt::Place => "location",
+            GeoFmt::Full => "location / asn",
+        }
+    }
+
+    pub fn render(self, g: &GeoInfo) -> String {
+        let cc = g.cc.clone();
+        let join = |v: Vec<Option<String>>| v.into_iter().flatten().collect::<Vec<_>>().join(" ");
+        match self {
+            GeoFmt::Off => String::new(),
+            GeoFmt::Short => g.short(),
+            GeoFmt::Org => join(vec![cc, g.as_org.clone().or(g.asn.map(|a| format!("AS{a}")))]),
+            GeoFmt::Asn => join(vec![cc, g.asn.map(|a| format!("AS{a}"))]),
+            GeoFmt::Place => g.city_cc(),
+            GeoFmt::Full => {
+                let p = if g.city.is_some() { g.city_cc() } else { g.cc.clone().unwrap_or_default() };
+                let a = g.as_text();
+                match (p.is_empty(), a.is_empty()) {
+                    (false, false) => format!("{p} · {a}"),
+                    (true, _) => a,
+                    (false, true) => p,
+                }
+            }
+        }
     }
 }
 
@@ -216,6 +308,32 @@ fn user_home(user: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn formats() {
+        let g = GeoInfo {
+            cc: Some("PL".into()),
+            country: Some("Poland".into()),
+            city: Some("Warsaw".into()),
+            asn: Some(8501),
+            as_org: Some("PSNC".into()),
+        };
+        assert_eq!(GeoFmt::Short.render(&g), "PL AS8501 PSNC");
+        assert_eq!(GeoFmt::Org.render(&g), "PL PSNC");
+        assert_eq!(GeoFmt::Asn.render(&g), "PL AS8501");
+        assert_eq!(GeoFmt::Place.render(&g), "Warsaw, PL");
+        assert_eq!(GeoFmt::Full.render(&g), "Warsaw, PL · AS8501 PSNC");
+        let a = GeoInfo { asn: Some(15169), as_org: Some("Google LLC".into()), ..Default::default() };
+        assert_eq!(GeoFmt::Full.render(&a), "AS15169 Google LLC");
+        assert_eq!(GeoFmt::Place.render(&a), "");
+        let mut f = GeoFmt::Short;
+        for _ in 0..GeoFmt::ALL.len() {
+            f = f.next();
+        }
+        assert_eq!(f, GeoFmt::Short);
+    }
+
     #[test]
     fn home_lookup() {
         assert_eq!(super::user_home("root"), Some(std::path::PathBuf::from("/root")));

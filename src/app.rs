@@ -2,7 +2,7 @@
 
 use crate::capture::Capture;
 use crate::filter::{Cidr, Expr, Filter, Scope};
-use crate::geo::Geo;
+use crate::geo::{Geo, GeoFmt};
 use crate::probe::Probe;
 use crate::resolver::Resolver;
 use crate::stats::{FlowKey, SharedStats, Stats, FLOW_HIST, TOTAL_HIST};
@@ -149,7 +149,7 @@ pub struct App {
     pub bytes: bool,
     // extras
     pub show_graph: bool,
-    pub show_geo: bool,
+    pub geo_fmt: GeoFmt,
     /// Averaging windows (seconds) of the three rate columns.
     pub windows: [u64; 3],
     /// How often rows/graphs are recomputed.
@@ -180,6 +180,11 @@ pub struct App {
     last_pkts: (u64, Instant),
     pub ifaces: Vec<IfaceEntry>,
     pub iface_sel: usize,
+    /// First visible row of the interface picker (kept in view by the UI).
+    pub iface_off: usize,
+    /// screen row y -> interface index, and the popup's area (for mouse)
+    pub iface_hits: Vec<(u16, usize)>,
+    pub popup_area: Option<(u16, u16, u16, u16)>,
     ifstat_prev: (HashMap<String, (u64, u64)>, Instant),
     /// screen row y -> row index (for mouse), filled by the UI
     pub row_hits: Vec<(u16, usize)>,
@@ -206,6 +211,8 @@ impl App {
         };
         let stats: SharedStats = Arc::new(Mutex::new(Stats::new(filter)));
         let iface = args.interface.clone().unwrap_or_else(util::default_iface);
+        let geo_fmt = GeoFmt::parse(&args.geo_format)
+            .ok_or_else(|| anyhow::anyhow!("--geo-format: expected short, org, asn, place, full or off"))?;
 
         let geo_paths = match &args.geoip {
             Some(p) => vec![p.into()],
@@ -246,7 +253,7 @@ impl App {
             promisc: args.promiscuous,
             user_nets,
             resolver: Resolver::new(4),
-            show_geo: geo.available(),
+            geo_fmt: if geo.available() { geo_fmt } else { GeoFmt::Off },
             geo,
             services: Services::load(),
             dns: !args.no_dns,
@@ -291,6 +298,9 @@ impl App {
             last_pkts: (0, Instant::now()),
             ifaces: Vec::new(),
             iface_sel: 0,
+            iface_off: 0,
+            iface_hits: Vec::new(),
+            popup_area: None,
             ifstat_prev: (HashMap::new(), Instant::now()),
             row_hits: Vec::new(),
             last_click: None,
@@ -528,11 +538,11 @@ impl App {
         for r in rows.iter_mut() {
             r.local = self.endpoint(r.key.local, r.key.lport, r.key.proto);
             r.remote = self.endpoint(r.key.remote, r.key.rport, r.key.proto);
-            if self.show_geo {
+            if self.geo_fmt != GeoFmt::Off {
                 // Geo of the peer (or of the local side if peers are aggregated).
                 if let Some(ip) = r.key.remote.or(r.key.local) {
                     if let Some(g) = self.geo.lookup(&ip) {
-                        r.geo = g.short();
+                        r.geo = self.geo_fmt.render(&g);
                     }
                 }
             }
@@ -675,7 +685,11 @@ impl App {
     // --------------------------------------------------------------- input
 
     fn on_mouse(&mut self, m: MouseEvent) {
-        if self.host.is_some() || self.popup != Popup::None {
+        if self.popup != Popup::None && self.host.is_none() {
+            self.on_popup_mouse(m);
+            return;
+        }
+        if self.host.is_some() {
             if let MouseEventKind::Down(MouseButton::Right) = m.kind {
                 self.host = None;
                 self.popup = Popup::None;
@@ -700,6 +714,43 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn on_popup_mouse(&mut self, m: MouseEvent) {
+        let inside = self
+            .popup_area
+            .is_some_and(|(x, y, w, h)| m.column >= x && m.column < x + w && m.row >= y && m.row < y + h);
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Right) => self.popup = Popup::None,
+            MouseEventKind::Down(MouseButton::Left) if !inside || self.popup == Popup::Help => {
+                self.popup = Popup::None
+            }
+            MouseEventKind::Down(MouseButton::Left) if self.popup == Popup::Ifaces => {
+                if let Some(&(_, idx)) = self.iface_hits.iter().find(|(y, _)| *y == m.row) {
+                    if self.iface_sel == idx {
+                        self.pick_iface();
+                    } else {
+                        self.iface_sel = idx;
+                    }
+                }
+            }
+            MouseEventKind::ScrollDown if self.popup == Popup::Ifaces => self.move_iface_sel(1),
+            MouseEventKind::ScrollUp if self.popup == Popup::Ifaces => self.move_iface_sel(-1),
+            _ => {}
+        }
+    }
+
+    fn move_iface_sel(&mut self, d: i64) {
+        let n = self.ifaces.len() as i64;
+        self.iface_sel = (self.iface_sel as i64 + d).clamp(0, (n - 1).max(0)) as usize;
+    }
+
+    fn pick_iface(&mut self) {
+        if let Some(e) = self.ifaces.get(self.iface_sel) {
+            let n = e.name.clone();
+            self.popup = Popup::None;
+            self.switch_iface(n);
         }
     }
 
@@ -774,17 +825,13 @@ impl App {
             Popup::Ifaces => {
                 match k.code {
                     KeyCode::Esc | KeyCode::Char('i') | KeyCode::Char('q') => self.popup = Popup::None,
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        self.iface_sel = (self.iface_sel + 1).min(self.ifaces.len().saturating_sub(1))
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => self.iface_sel = self.iface_sel.saturating_sub(1),
-                    KeyCode::Enter => {
-                        if let Some(e) = self.ifaces.get(self.iface_sel) {
-                            let n = e.name.clone();
-                            self.popup = Popup::None;
-                            self.switch_iface(n);
-                        }
-                    }
+                    KeyCode::Down | KeyCode::Char('j') => self.move_iface_sel(1),
+                    KeyCode::Up | KeyCode::Char('k') => self.move_iface_sel(-1),
+                    KeyCode::PageDown => self.move_iface_sel(10),
+                    KeyCode::PageUp => self.move_iface_sel(-10),
+                    KeyCode::Home | KeyCode::Char('g') => self.iface_sel = 0,
+                    KeyCode::End | KeyCode::Char('G') => self.move_iface_sel(i64::MAX / 2),
+                    KeyCode::Enter => self.pick_iface(),
                     _ => {}
                 }
                 return false;
@@ -911,7 +958,8 @@ impl App {
             }
             KeyCode::Char('G') => {
                 if self.geo.available() {
-                    self.show_geo = !self.show_geo;
+                    self.geo_fmt = self.geo_fmt.next();
+                    self.flash(format!("geo column: {}", self.geo_fmt.name()));
                 } else {
                     self.flash("no GeoIP databases found (use --geoip DIR)");
                 }

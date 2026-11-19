@@ -31,7 +31,7 @@ runs ping and traceroute.
 - **Filters that are applied to history:** a BPF-ish filter language (`f`), a quick screen
   search (`/`), and an *external only* scope (`x`). Change them and the whole view, graph
   included, updates immediately.
-- **Interface picker** (`i`, or `[` / `]`) with live rates per interface.
+- **Interface picker** (`i`, or `[` / `]`) with live rates per interface; scrollable, clickable.
 - **Mouse support:** wheel to scroll, click to select, click again for the host panel.
 
 ## Download
@@ -107,6 +107,7 @@ sudo iptop -u 500 -w 1,5,20         # update twice a second, 1/5/20 s averages
 | `-u MS` | update interval |
 | `-w A,B,C` | averaging windows in seconds |
 | `--geoip PATH` | `.mmdb` file or directory |
+| `--geo-format FMT` | geo column: `short` `org` `asn` `place` `full` `off` |
 
 ## Keys
 
@@ -116,7 +117,7 @@ sudo iptop -u 500 -w 1,5,20         # update twice a second, 1/5/20 s averages
 | `s` / `d` | hide local / remote host | `i`, `[` `]` | interface picker / prev / next |
 | `S` `D` `p` | local / remote / all ports | `x` | scope: all → external → internal |
 | `t` | two-line / one-line / sent / recv | `F` | clear filter + search |
-| `1 2 3 < >` | sort by window / src / dst | `G` | geo/ASN column |
+| `1 2 3 < >` | sort by window / src / dst | `G` | geo column format (or off) |
 | `o` | freeze order | `g` | traffic graph |
 | `b` / `B` | bars / bar window | `u` | bits ↔ bytes |
 | `L` | log / linear bars | `r` | reset stats |
@@ -144,7 +145,17 @@ pass with `-I`.
 ## GeoIP
 
 iptop reads any MaxMind-format database: GeoLite2 City/Country/ASN, DB-IP lite, or your own
-patched copy. It merges what it finds, so City + ASN gives `Warsaw, Poland (PL) · AS8501 …`.
+patched copy. It merges what it finds, so City + ASN gives `Warsaw, Poland (PL) · AS8501 …` in the
+host panel. `G` cycles the table column through these formats:
+
+| format | example |
+|---|---|
+| `short` (default) | `PL AS8501 PSNC` |
+| `org` | `PL PSNC` |
+| `asn` | `PL AS8501` |
+| `place` | `Warsaw, PL` |
+| `full` | `Warsaw, PL · AS8501 PSNC` |
+| `off` | column hidden |
 
 Search order: `--geoip PATH` → `~/geoip-*/mmdb/` → `~/geoip-*/` (also under `$SUDO_USER`'s home) →
 `~/.local/share/iptop/` → `/usr/share/GeoIP` → `/var/lib/GeoIP` → `/usr/local/share/GeoIP`.
