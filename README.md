@@ -34,7 +34,24 @@ runs ping and traceroute.
 - **Interface picker** (`i`, or `[` / `]`) with live rates per interface.
 - **Mouse support:** wheel to scroll, click to select, click again for the host panel.
 
-## Install
+## Download
+
+Each release has static Linux binaries (musl, no dependencies):
+
+| file | for |
+|---|---|
+| `iptop-vX.Y.Z-x86_64-linux.tar.gz` | PCs and servers, Intel or AMD |
+| `iptop-vX.Y.Z-aarch64-linux.tar.gz` | Raspberry Pi 4 / 5 with a 64-bit OS, other ARM64 boards |
+| `iptop-vX.Y.Z-armv7-linux.tar.gz` | Raspberry Pi 2 / 3 / 4 with a 32-bit OS |
+
+On a Pi, `uname -m` tells you which one you need: `aarch64` or `armv7l`.
+
+```sh
+tar xzf iptop-v0.1.0-x86_64-linux.tar.gz
+sudo install -m755 iptop-v0.1.0-x86_64-linux/iptop /usr/local/bin/
+```
+
+## Build from source
 
 ```sh
 cargo build --release
@@ -127,7 +144,8 @@ src/geo.rs       mmdb lookups
 src/resolver.rs  async reverse DNS
 ```
 
-`cargo test` runs the parser, filter and probe tests.
+`cargo test` runs the parser, filter and probe tests. `scripts/release.sh` builds the static
+release tarballs into `dist/` (it needs `cargo-zigbuild` and `zig`).
 
 ## Credits
 
