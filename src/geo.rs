@@ -125,8 +125,12 @@ impl Geo {
     /// over `~/geoip-*`, then the usual system locations.
     pub fn default_paths() -> Vec<PathBuf> {
         let mut homes = Vec::new();
+        // Under sudo, also search the invoking user's real home (it is not
+        // always /home/<user>, e.g. qlab -> /home/lab).
         if let Ok(u) = std::env::var("SUDO_USER") {
-            homes.push(PathBuf::from(format!("/home/{u}")));
+            if let Some(h) = user_home(&u) {
+                homes.push(h);
+            }
         }
         if let Ok(h) = std::env::var("HOME") {
             homes.push(PathBuf::from(h));
@@ -194,5 +198,27 @@ impl Geo {
         let res = if g.is_empty() { None } else { Some(g) };
         self.cache.lock().unwrap().insert(*ip, res.clone());
         res
+    }
+}
+
+/// Home directory of `user` from the passwd database (works with musl too).
+fn user_home(user: &str) -> Option<PathBuf> {
+    let c = std::ffi::CString::new(user).ok()?;
+    unsafe {
+        let pw = libc::getpwnam(c.as_ptr());
+        if pw.is_null() || (*pw).pw_dir.is_null() {
+            return None;
+        }
+        let dir = std::ffi::CStr::from_ptr((*pw).pw_dir).to_string_lossy().into_owned();
+        Some(PathBuf::from(dir))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn home_lookup() {
+        assert_eq!(super::user_home("root"), Some(std::path::PathBuf::from("/root")));
+        assert_eq!(super::user_home("no-such-user-iptop"), None);
     }
 }
