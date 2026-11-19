@@ -62,6 +62,24 @@ sudo setcap cap_net_raw,cap_net_admin=eip /usr/local/bin/iptop   # optional: run
 When iptop runs as root, traceroute sends ICMP probes, which get through more firewalls.
 Otherwise it falls back to UDP `traceroute` or `tracepath`.
 
+## Nix / NixOS
+
+```sh
+sudo nix run .        # from a checkout; also: nix build, nix develop
+```
+
+On NixOS, import the flake's module to get a capability wrapper at
+`/run/wrappers/bin/iptop`, so it runs without sudo:
+
+```nix
+{
+  inputs.iptop.url = "github:Michuu/iptop";
+  # in your nixosSystem modules:
+  #   iptop.nixosModules.default
+  #   { programs.iptop.enable = true; }
+}
+```
+
 ## Usage
 
 ```sh
