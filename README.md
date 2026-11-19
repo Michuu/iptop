@@ -14,7 +14,7 @@ they are (GeoIP and ASN). It keeps iftop's key bindings and adds braille graphs,
 filters that apply to past traffic as well as new, an interface picker, and a per-host panel that
 runs ping and traceroute.
 
-<!-- TODO: screenshot -->
+![iptop main view: traffic graph, per-host table with GeoIP/ASN and sparklines](assets/screenshot.png)
 
 ## Features
 
