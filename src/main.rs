@@ -71,6 +71,13 @@ pub struct Args {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    // A capability wrapper (e.g. NixOS security.wrappers) hands us
+    // cap_net_raw/cap_net_admin as ambient capabilities, which every child
+    // would inherit. Drop them so the PATH-resolved ping/traceroute we spawn
+    // run unprivileged; our own permitted/effective set is unaffected.
+    unsafe {
+        libc::prctl(libc::PR_CAP_AMBIENT, libc::PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
+    }
     let mut app = app::App::new(&args)?;
     let mut terminal = ratatui::init();
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
