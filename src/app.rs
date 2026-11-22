@@ -150,6 +150,8 @@ pub struct App {
     // extras
     pub show_graph: bool,
     pub geo_fmt: GeoFmt,
+    /// Host panel targets the local side of the selected row instead of the remote one.
+    pub host_local: bool,
     /// Averaging windows (seconds) of the three rate columns.
     pub windows: [u64; 3],
     /// How often rows/graphs are recomputed.
@@ -254,6 +256,7 @@ impl App {
             user_nets,
             resolver: Resolver::new(4),
             geo_fmt: if geo.available() { geo_fmt } else { GeoFmt::Off },
+            host_local: false,
             geo,
             services: Services::load(),
             dns: !args.no_dns,
@@ -661,7 +664,12 @@ impl App {
 
     fn open_host(&mut self) {
         let Some(r) = self.rows.get(self.selected) else { return };
-        let Some(ip) = r.key.remote.or(r.key.local) else { return };
+        let ip = if self.host_local { r.key.local.or(r.key.remote) } else { r.key.remote.or(r.key.local) };
+        let Some(ip) = ip else { return };
+        // Same target (e.g. j/k between rows sharing the local host): keep the running probes.
+        if self.host.as_ref().is_some_and(|h| h.ip == ip) {
+            return;
+        }
         self.host = Some(HostView {
             ip,
             probe: Probe::start(ip),
@@ -671,6 +679,35 @@ impl App {
             rate: (0.0, 0.0),
             totals: (0, 0),
         });
+    }
+
+    /// Close the host panel; the next one opens on the remote side again.
+    fn close_host(&mut self) {
+        self.host = None;
+        self.host_local = false;
+    }
+
+    /// Host panel: switch between the selected row's remote and local host.
+    fn toggle_host_side(&mut self) {
+        let Some(r) = self.rows.get(self.selected) else { return };
+        let other = if self.host_local { r.key.remote } else { r.key.local };
+        if other.is_none() {
+            let side = if self.host_local { "remote" } else { "local" };
+            self.flash(format!("no {side} host on this row (aggregated)"));
+            return;
+        }
+        self.host_local = !self.host_local;
+        self.open_host();
+        self.flash(if self.host_local { "host panel: local side" } else { "host panel: remote side" });
+    }
+
+    fn cycle_geo(&mut self) {
+        if self.geo.available() {
+            self.geo_fmt = self.geo_fmt.next();
+            self.flash(format!("geo: {}", self.geo_fmt.name()));
+        } else {
+            self.flash("no GeoIP databases found (use --geoip DIR)");
+        }
     }
 
     fn move_sel(&mut self, d: i64) {
@@ -691,7 +728,7 @@ impl App {
         }
         if self.host.is_some() {
             if let MouseEventKind::Down(MouseButton::Right) = m.kind {
-                self.host = None;
+                self.close_host();
                 self.popup = Popup::None;
             }
             return;
@@ -797,7 +834,7 @@ impl App {
 
         if self.host.is_some() {
             match k.code {
-                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Backspace => self.host = None,
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Backspace => self.close_host(),
                 KeyCode::Char('r') => {
                     // restart probes
                     if let Some(h) = &mut self.host {
@@ -812,6 +849,8 @@ impl App {
                     self.move_sel(-1);
                     self.open_host();
                 }
+                KeyCode::Tab | KeyCode::Char('l') => self.toggle_host_side(),
+                KeyCode::Char('G') => self.cycle_geo(),
                 _ => {}
             }
             return false;
@@ -956,14 +995,7 @@ impl App {
                 let [a, b, c] = self.windows;
                 self.flash(format!("averaging windows {a}s / {b}s / {c}s"));
             }
-            KeyCode::Char('G') => {
-                if self.geo.available() {
-                    self.geo_fmt = self.geo_fmt.next();
-                    self.flash(format!("geo column: {}", self.geo_fmt.name()));
-                } else {
-                    self.flash("no GeoIP databases found (use --geoip DIR)");
-                }
-            }
+            KeyCode::Char('G') => self.cycle_geo(),
             KeyCode::Char('u') => {
                 self.bytes = !self.bytes;
                 self.flash(if self.bytes { "units: bytes" } else { "units: bits" });

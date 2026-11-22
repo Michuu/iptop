@@ -115,11 +115,11 @@ sudo iptop -u 500 -w 1,5,20         # update twice a second, 1/5/20 s averages
 
 | iftop classics | | iptop extras | |
 |---|---|---|---|
-| `n` / `N` | DNS / port names | `⏎` / click | **host panel**: geo, ASN, ping, traceroute, flows |
+| `n` / `N` | DNS / port names | `⏎` / click | **host panel**: geo, ASN, ping, traceroute, flows; `tab`/`l` switches remote ↔ local host |
 | `s` / `d` | hide local / remote host | `i`, `[` `]` | interface picker / prev / next |
 | `S` `D` `p` | local / remote / all ports | `x` | scope: all → external → internal |
 | `t` | two-line / one-line / sent / recv | `F` | clear filter + search |
-| `1 2 3 < >` | sort by window / src / dst | `G` | geo column format (or off) |
+| `1 2 3 < >` | sort by window / src / dst | `G` | geo format, table + traceroute (or off) |
 | `o` | freeze order | `g` | traffic graph |
 | `b` / `B` | bars / bar window | `u` | bits ↔ bytes |
 | `L` | log / linear bars | `r` | reset stats |
@@ -148,7 +148,7 @@ pass with `-I`.
 
 iptop reads any MaxMind-format database: GeoLite2 City/Country/ASN, DB-IP lite, or your own
 patched copy. It merges what it finds, so City + ASN gives `Warsaw, Poland (PL) · AS8501 …` in the
-host panel. `G` cycles the table column through these formats:
+host panel. `G` cycles the table column and the host panel's traceroute through these formats:
 
 | format | example |
 |---|---|

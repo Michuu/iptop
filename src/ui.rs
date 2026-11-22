@@ -639,10 +639,11 @@ fn draw_help(f: &mut Frame, area: Rect) {
             "iptop extras",
             &[
                 ("⏎ / click", "host panel: geo, ASN, ping, traceroute, flows"),
+                ("tab / l", "host panel: probe the remote ↔ local host"),
                 ("i  [  ]", "interface picker / previous / next interface"),
                 ("x", "scope: all → external only → internal only"),
                 ("F", "clear filter and search"),
-                ("G", "geo column: AS+org → org → AS → city → city+AS → off"),
+                ("G", "geo (table + traceroute): AS+org → org → AS → city → city+AS → off"),
                 ("g", "toggle traffic graph"),
                 ("+ / -", "update interval 100ms … 10s (like btop)"),
                 ("w", "averaging windows 1/5/20 · 2/10/40 · 5/30/120 · 10/60/300 s"),
@@ -756,8 +757,11 @@ fn draw_host(f: &mut Frame, area: Rect, app: &App) {
     if let Some(n) = &name {
         t.push(Span::styled(format!("  {n}"), Style::new().fg(FG)));
     }
+    t.push(Span::styled(if app.host_local { "  local side" } else { "  remote side" }, Style::new().fg(DIM)));
     t.push(Span::raw(" "));
-    let block = panel(Line::from(t)).title_bottom(Line::from(" esc back · j/k prev/next · r restart probes ").right_aligned());
+    let block = panel(Line::from(t)).title_bottom(
+        Line::from(" esc back · j/k prev/next · tab/l local↔remote · G geo · r restart probes ").right_aligned(),
+    );
     let inner = block.inner(r);
     f.render_widget(block, r);
 
@@ -876,8 +880,10 @@ fn draw_host(f: &mut Frame, area: Rect, app: &App) {
             buf.set_string(tri.x + 1, tri.y, e, Style::new().fg(ERR));
         }
         let w = tri.width as usize;
-        let name_w = w.saturating_sub(4 + 16 + 9 + 4) * 45 / 100;
-        let geo_w = w.saturating_sub(4 + 16 + 9 + name_w + 4);
+        // With geo off the hostname takes the whole remaining width.
+        let rest = w.saturating_sub(4 + 16 + 9 + 4);
+        let name_w = if app.geo_fmt == GeoFmt::Off { rest } else { rest * 45 / 100 };
+        let geo_w = if app.geo_fmt == GeoFmt::Off { 0 } else { w.saturating_sub(4 + 16 + 9 + name_w + 4) };
         for (i, hop) in hops.iter().enumerate().take(tri.height as usize) {
             let y = tri.y + i as u16;
             let mut x = tri.x + 1;
@@ -898,9 +904,11 @@ fn draw_host(f: &mut Frame, area: Rect, app: &App) {
                     let nm = if app.dns { app.resolver.lookup(&ip).unwrap_or_default() } else { String::new() };
                     buf.set_stringn(x, y, fit(&nm, name_w), name_w, Style::new().fg(DIM));
                     x += name_w as u16 + 1;
-                    if let Some(g) = app.geo.lookup(&ip) {
-                        let s = g.short();
-                        buf.set_stringn(x, y, fit(&s, geo_w), geo_w, Style::new().fg(TX_C));
+                    if geo_w > 0 {
+                        if let Some(g) = app.geo.lookup(&ip) {
+                            let s = app.geo_fmt.render(&g);
+                            buf.set_stringn(x, y, fit(&s, geo_w), geo_w, Style::new().fg(TX_C));
+                        }
                     }
                 }
             }
