@@ -51,8 +51,8 @@ Each release has static Linux binaries (musl, no dependencies):
 On a Pi, `uname -m` tells you which one you need: `aarch64`, `armv7l` or `armv6l`.
 
 ```sh
-tar xzf iptop-v0.1.2-x86_64-linux.tar.gz
-sudo install -m755 iptop-v0.1.2-x86_64-linux/iptop /usr/local/bin/
+tar xzf iptop-v0.1.3-x86_64-linux.tar.gz
+sudo install -m755 iptop-v0.1.3-x86_64-linux/iptop /usr/local/bin/
 ```
 
 ## Build from source
