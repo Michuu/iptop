@@ -36,9 +36,22 @@ runs ping and traceroute.
 - **Mouse support:** wheel to scroll, click to select, click again for the host panel.
 - **Config file** (`~/.config/iptop/config`) for the options you always pass.
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Michuu/iptop/main/install.sh | sh
+```
+
+The script picks the right binary for your CPU, verifies it against the release's `SHA256SUMS`
+and installs it to `/usr/local/bin` (using `sudo` if needed). It works with `wget` too:
+`wget -qO- https://raw.githubusercontent.com/Michuu/iptop/main/install.sh | sh`.
+Options: `IPTOP_VERSION=v0.1.3` (a specific version), `IPTOP_PREFIX=~/.local/bin` (another directory),
+`IPTOP_SETCAP=1` (allow running without `sudo`; this lets every local user capture traffic).
+
 ## Download
 
-Each release has static Linux binaries (musl, no dependencies):
+Or download by hand. Each [release](https://github.com/Michuu/iptop/releases) has static Linux
+binaries (musl, no dependencies):
 
 | file | for |
 |---|---|
