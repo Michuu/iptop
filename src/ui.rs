@@ -574,7 +574,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let keys: &[(&str, &str)] = if app.host.is_some() {
-        &[("esc", "back"), ("j/k", "prev/next host"), ("r", "restart probes")]
+        &[("esc", "back"), ("j/k", "prev/next host"), ("tab", "local↔remote"), ("G", "geo"), ("r", "restart probes")]
     } else {
         &[
             ("h", "help"),
@@ -757,7 +757,7 @@ fn draw_host(f: &mut Frame, area: Rect, app: &App) {
     if let Some(n) = &name {
         t.push(Span::styled(format!("  {n}"), Style::new().fg(FG)));
     }
-    t.push(Span::styled(if app.host_local { "  local side" } else { "  remote side" }, Style::new().fg(DIM)));
+    t.push(Span::styled(if h.local { "  local side" } else { "  remote side" }, Style::new().fg(DIM)));
     t.push(Span::raw(" "));
     let block = panel(Line::from(t)).title_bottom(
         Line::from(" esc back · j/k prev/next · tab/l local↔remote · G geo · r restart probes ").right_aligned(),

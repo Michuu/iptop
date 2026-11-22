@@ -112,6 +112,8 @@ pub struct IfaceEntry {
 /// State of the per-host panel (Enter / click on a row).
 pub struct HostView {
     pub ip: IpAddr,
+    /// The panel shows the row's local side (aggregated rows may force a side).
+    pub local: bool,
     pub probe: Probe,
     /// flows touching this host: (key, sent 2s, recv 2s, total bytes)
     pub flows: Vec<(FlowKey, f64, f64, u64)>,
@@ -664,14 +666,20 @@ impl App {
 
     fn open_host(&mut self) {
         let Some(r) = self.rows.get(self.selected) else { return };
-        let ip = if self.host_local { r.key.local.or(r.key.remote) } else { r.key.remote.or(r.key.local) };
-        let Some(ip) = ip else { return };
+        // Aggregated rows (s / d) have only one side; fall back to it.
+        let (ip, local) = match (self.host_local, r.key.local, r.key.remote) {
+            (true, Some(l), _) | (false, Some(l), None) => (l, true),
+            (_, _, Some(rm)) => (rm, false),
+            (_, None, None) => return,
+        };
         // Same target (e.g. j/k between rows sharing the local host): keep the running probes.
-        if self.host.as_ref().is_some_and(|h| h.ip == ip) {
+        if let Some(h) = self.host.as_mut().filter(|h| h.ip == ip) {
+            h.local = local;
             return;
         }
         self.host = Some(HostView {
             ip,
+            local,
             probe: Probe::start(ip),
             flows: Vec::new(),
             rx: Vec::new(),
@@ -690,13 +698,15 @@ impl App {
     /// Host panel: switch between the selected row's remote and local host.
     fn toggle_host_side(&mut self) {
         let Some(r) = self.rows.get(self.selected) else { return };
-        let other = if self.host_local { r.key.remote } else { r.key.local };
+        // Toggle relative to what the panel actually shows.
+        let want_local = !self.host.as_ref().map_or(self.host_local, |h| h.local);
+        let other = if want_local { r.key.local } else { r.key.remote };
         if other.is_none() {
-            let side = if self.host_local { "remote" } else { "local" };
+            let side = if want_local { "local" } else { "remote" };
             self.flash(format!("no {side} host on this row (aggregated)"));
             return;
         }
-        self.host_local = !self.host_local;
+        self.host_local = want_local;
         self.open_host();
         self.flash(if self.host_local { "host panel: local side" } else { "host panel: remote side" });
     }
