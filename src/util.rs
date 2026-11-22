@@ -208,9 +208,90 @@ pub fn iface_addrs() -> HashMap<String, Vec<IpAddr>> {
     m
 }
 
+/// Home directory of `user` from the passwd database (works with musl too).
+pub fn user_home(user: &str) -> Option<std::path::PathBuf> {
+    let c = std::ffi::CString::new(user).ok()?;
+    unsafe {
+        let pw = libc::getpwnam(c.as_ptr());
+        if pw.is_null() || (*pw).pw_dir.is_null() {
+            return None;
+        }
+        Some(CStr::from_ptr((*pw).pw_dir).to_string_lossy().into_owned().into())
+    }
+}
+
+fn base64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for ch in data.chunks(3) {
+        let b = [ch[0], *ch.get(1).unwrap_or(&0), *ch.get(2).unwrap_or(&0)];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        for i in 0..4 {
+            if i <= ch.len() {
+                out.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// Put `text` on the clipboard: OSC 52 (works over ssh in most terminals,
+/// not in GNOME's VTE-based ones), plus wl-copy / xclip / xsel when a local
+/// desktop session is reachable. Returns how it was sent.
+pub fn copy_to_clipboard(text: &str) -> &'static str {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b]52;c;{}\x07", base64(text.as_bytes()));
+    let _ = out.flush();
+    let tools: &[(&str, &[&str], &str)] = &[
+        ("WAYLAND_DISPLAY", &["wl-copy"], "wl-copy"),
+        ("DISPLAY", &["xclip", "-selection", "clipboard"], "xclip"),
+        ("DISPLAY", &["xsel", "-b", "-i"], "xsel"),
+    ];
+    for (env, cmd, name) in tools {
+        if std::env::var_os(env).is_none() {
+            continue;
+        }
+        let child = Command::new(cmd[0])
+            .args(&cmd[1..])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if let Ok(mut c) = child {
+            if let Some(mut i) = c.stdin.take() {
+                let _ = i.write_all(text.as_bytes());
+            }
+            if c.wait().is_ok_and(|s| s.success()) {
+                return name;
+            }
+        }
+    }
+    "terminal (OSC 52)"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_lookup() {
+        assert_eq!(user_home("root"), Some(std::path::PathBuf::from("/root")));
+        assert_eq!(user_home("no-such-user-iptop"), None);
+    }
+
+    #[test]
+    fn b64() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"8.8.8.8"), "OC44LjguOA==");
+    }
+
     #[test]
     fn rates() {
         assert_eq!(fmt_rate(0.0, false), "0b");

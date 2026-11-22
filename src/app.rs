@@ -212,8 +212,8 @@ impl App {
             text,
             scope: if args.external { Scope::External } else { Scope::All },
             internal_nets,
+            geo: None,
         };
-        let stats: SharedStats = Arc::new(Mutex::new(Stats::new(filter)));
         let iface = args.interface.clone().unwrap_or_else(util::default_iface);
         let geo_fmt = GeoFmt::parse(&args.geo_format)
             .ok_or_else(|| anyhow::anyhow!("--geo-format: expected short, org, asn, place, full or off"))?;
@@ -223,6 +223,8 @@ impl App {
             None => Geo::default_paths(),
         };
         let geo = Arc::new(Geo::load(&geo_paths));
+        let filter = Filter { geo: geo.available().then(|| geo.clone()), ..filter };
+        let stats: SharedStats = Arc::new(Mutex::new(Stats::new(filter)));
 
         let sort = match args.order.as_str() {
             "10s" => Sort::Col(1),
@@ -711,6 +713,42 @@ impl App {
         self.flash(if self.host_local { "host panel: local side" } else { "host panel: remote side" });
     }
 
+    /// The host a key acts on: the host panel's, else the selected row's shown peer.
+    fn target_ip(&self) -> Option<IpAddr> {
+        if let Some(h) = &self.host {
+            return Some(h.ip);
+        }
+        let r = self.rows.get(self.selected)?;
+        r.key.remote.or(r.key.local)
+    }
+
+    /// `e` hides the host, `E` shows only it; ANDed onto the current filter.
+    fn quick_filter(&mut self, only: bool) {
+        let Some(ip) = self.target_ip() else { return };
+        let term = if only { format!("host {ip}") } else { format!("not host {ip}") };
+        let old = self.stats.lock().unwrap().filter.text.clone();
+        let text = if old.is_empty() { term } else { format!("({old}) and {term}") };
+        match Expr::parse(&text) {
+            Ok(expr) => {
+                self.update_filter(|f| {
+                    f.expr = expr;
+                    f.text = text.clone();
+                });
+                self.close_host();
+                self.flash(format!("filter: {text}   (F clears)"));
+            }
+            Err(e) => self.flash(format!("filter error: {e}")),
+        }
+    }
+
+    /// `y` copies the IP, `Y` the hostname (or the IP if unresolved).
+    fn copy_host(&mut self, name: bool) {
+        let Some(ip) = self.target_ip() else { return };
+        let text = if name { self.resolver.lookup(&ip).unwrap_or_else(|| ip.to_string()) } else { ip.to_string() };
+        let via = util::copy_to_clipboard(&text);
+        self.flash(format!("copied {text} via {via}"));
+    }
+
     fn cycle_geo(&mut self) {
         if self.geo.available() {
             self.geo_fmt = self.geo_fmt.next();
@@ -819,12 +857,13 @@ impl App {
                     InputKind::Filter => match Expr::parse(&self.input_buf) {
                         Ok(expr) => {
                             let text = self.input_buf.trim().to_string();
+                            let no_geo = expr.as_ref().is_some_and(|e| e.uses_geo()) && !self.geo.available();
                             self.update_filter(|f| {
                                 f.expr = expr;
                                 f.text = text;
                             });
                             self.input = None;
-                            self.flash("filter applied");
+                            self.flash(if no_geo { "filter applied, but asn/cc/org need GeoIP databases" } else { "filter applied" });
                         }
                         Err(e) => self.flash(format!("filter error: {e}")),
                     },
@@ -860,6 +899,10 @@ impl App {
                     self.open_host();
                 }
                 KeyCode::Tab | KeyCode::Char('l') => self.toggle_host_side(),
+                KeyCode::Char('e') => self.quick_filter(false),
+                KeyCode::Char('E') => self.quick_filter(true),
+                KeyCode::Char('y') => self.copy_host(false),
+                KeyCode::Char('Y') => self.copy_host(true),
                 KeyCode::Char('G') => self.cycle_geo(),
                 _ => {}
             }
@@ -1006,6 +1049,10 @@ impl App {
                 self.flash(format!("averaging windows {a}s / {b}s / {c}s"));
             }
             KeyCode::Char('G') => self.cycle_geo(),
+            KeyCode::Char('e') => self.quick_filter(false),
+            KeyCode::Char('E') => self.quick_filter(true),
+            KeyCode::Char('y') => self.copy_host(false),
+            KeyCode::Char('Y') => self.copy_host(true),
             KeyCode::Char('u') => {
                 self.bytes = !self.bytes;
                 self.flash(if self.bytes { "units: bytes" } else { "units: bits" });

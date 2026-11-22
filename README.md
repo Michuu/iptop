@@ -28,11 +28,13 @@ runs ping and traceroute.
 - **GeoIP + ASN** from MaxMind `.mmdb` files (GeoLite2 City/ASN, or ones patched with your own networks).
 - **Host panel** (Enter or click): live ping with a loss graph, a traceroute where every hop
   gets geo and ASN, the host's traffic graph, and its individual flows.
-- **Filters that are applied to history:** a BPF-ish filter language (`f`), a quick screen
+- **Filters that are applied to history:** a BPF-ish filter language with GeoIP terms
+  (`f`; `asn 15169`, `cc PL`, `org google`), one-key hide/only for a host (`e` / `E`), a quick screen
   search (`/`), and an *external only* scope (`x`). Change them and the whole view, graph
   included, updates immediately.
 - **Interface picker** (`i`, or `[` / `]`) with live rates per interface; scrollable, clickable.
 - **Mouse support:** wheel to scroll, click to select, click again for the host panel.
+- **Config file** (`~/.config/iptop/config`) for the options you always pass.
 
 ## Download
 
@@ -110,6 +112,23 @@ sudo iptop -u 500 -w 1,5,20         # update twice a second, 1/5/20 s averages
 | `-w A,B,C` | averaging windows in seconds |
 | `--geoip PATH` | `.mmdb` file or directory |
 | `--geo-format FMT` | geo column: `short` `org` `asn` `place` `full` `off` |
+| `--config PATH` / `--no-config` | use another config file / ignore it |
+
+### Config file
+
+Options you always use can go in `~/.config/iptop/config` (under `sudo`, the invoking user's
+file is used). Each line is one option, as on the command line but without the dashes;
+anything given on the command line wins, and repeatable options (`-I`, `-F`) add up.
+
+```ini
+# external peers only; our own networks count as internal
+external
+internal-net = 192.168.10.0/24
+internal-net = 10.0.0.0/8
+internal-net = 198.51.100.7
+geo-format = full
+filter = not port 22          # the value is the rest of the line
+```
 
 ## Keys
 
@@ -118,7 +137,7 @@ sudo iptop -u 500 -w 1,5,20         # update twice a second, 1/5/20 s averages
 | `n` / `N` | DNS / port names | `⏎` / click | **host panel**: geo, ASN, ping, traceroute, flows; `tab`/`l` switches remote ↔ local host |
 | `s` / `d` | hide local / remote host | `i`, `[` `]` | interface picker / prev / next |
 | `S` `D` `p` | local / remote / all ports | `x` | scope: all → external → internal |
-| `t` | two-line / one-line / sent / recv | `F` | clear filter + search |
+| `t` | two-line / one-line / sent / recv | `e` / `E` | filter out this host / only this host |
 | `1 2 3 < >` | sort by window / src / dst | `G` | geo format, table + traceroute (or off) |
 | `o` | freeze order | `g` | traffic graph |
 | `b` / `B` | bars / bar window | `u` | bits ↔ bytes |
@@ -126,8 +145,9 @@ sudo iptop -u 500 -w 1,5,20         # update twice a second, 1/5/20 s averages
 | `T` | cumulative totals | `+` / `-` | update interval 100 ms … 10 s |
 | `P` | pause | `w` | windows 1/5/20 · 2/10/40 · 5/30/120 · 10/60/300 s |
 | `l` or `/` | screen search | `j k ↑ ↓ PgUp PgDn` | move selection |
-| `f` | edit filter | `h` / `?` | help |
-| `q` | quit | | |
+| `f` | edit filter | `F` | clear filter + search |
+| `q` | quit | `y` / `Y` | copy IP / hostname (OSC 52, wl-copy, xclip) |
+| | | `h` / `?` | help |
 
 ### Filter language
 
@@ -136,10 +156,12 @@ host|net CIDR          either side          src|dst [host|net] CIDR   local / re
 port N                 either side          src port N, dst port N
 tcp udp icmp sctp gre esp   proto N   ip   ip6
 external               has a non-internal end      internal    both ends internal
+asn N   cc XX   org "TEXT"   GeoIP of the remote peer (src asn … for the local side)
 not ! and && or || ( )                      juxtaposition means "and"
 ```
 
-For example: `tcp and not (port 22 or port 443)`, `dst net 8.8.0.0/16 or udp`, `external and port 53`.
+For example: `tcp and not (port 22 or port 443)`, `dst net 8.8.0.0/16 or udp`, `external and port 53`,
+`external and not cc PL`, `asn 15169 or org "cloudflare"`. `org` matches part of the AS organisation, ignoring case.
 
 **Internal** means RFC1918, CGNAT, loopback, link-local, ULA, broadcast and multicast, plus anything you
 pass with `-I`.
@@ -148,7 +170,7 @@ pass with `-I`.
 
 iptop reads any MaxMind-format database: GeoLite2 City/Country/ASN, DB-IP lite, or your own
 patched copy. It merges what it finds, so City + ASN gives `Warsaw, Poland (PL) · AS8501 …` in the
-host panel. `G` cycles the table column and the host panel's traceroute through these formats:
+host panel, along with the network block (`142.250.0.0/15`). `G` cycles the table column and the host panel's traceroute through these formats:
 
 | format | example |
 |---|---|

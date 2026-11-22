@@ -10,8 +10,10 @@
 //!            | tcp | udp | icmp | sctp | proto N | ip | ip6
 //!            | external | internal | CIDR | N (=port)
 
+use crate::geo::Geo;
 use crate::stats::FlowKey;
 use std::net::IpAddr;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cidr {
@@ -142,14 +144,27 @@ pub enum Expr {
     V6,
     External,
     Internal,
+    /// GeoIP terms; `local` picks the local side, default is the remote peer.
+    Asn { local: bool, asn: u32 },
+    Cc { local: bool, cc: String },
+    /// Case-insensitive substring of the AS organisation.
+    Org { local: bool, org: String },
 }
 
 impl Expr {
-    pub fn eval(&self, k: &FlowKey, nets: &[Cidr]) -> bool {
+    pub fn eval(&self, k: &FlowKey, nets: &[Cidr], geo: Option<&Geo>) -> bool {
+        let side = |local: bool| if local { k.local } else { k.remote };
+        let info = |local: bool| geo.and_then(|g| g.lookup(&side(local)));
         match self {
-            Expr::And(a, b) => a.eval(k, nets) && b.eval(k, nets),
-            Expr::Or(a, b) => a.eval(k, nets) || b.eval(k, nets),
-            Expr::Not(a) => !a.eval(k, nets),
+            Expr::And(a, b) => a.eval(k, nets, geo) && b.eval(k, nets, geo),
+            Expr::Or(a, b) => a.eval(k, nets, geo) || b.eval(k, nets, geo),
+            Expr::Not(a) => !a.eval(k, nets, geo),
+            Expr::Asn { local, asn } => info(*local).is_some_and(|g| g.asn == Some(*asn)),
+            Expr::Cc { local, cc } => {
+                info(*local).is_some_and(|g| g.cc.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(cc)))
+            }
+            Expr::Org { local, org } => info(*local)
+                .is_some_and(|g| g.as_org.as_deref().is_some_and(|o| o.to_lowercase().contains(org.as_str()))),
             Expr::Host(c) => c.contains(&k.local) || c.contains(&k.remote),
             Expr::Local(c) => c.contains(&k.local),
             Expr::Remote(c) => c.contains(&k.remote),
@@ -165,24 +180,18 @@ impl Expr {
         }
     }
 
-    pub fn parse(text: &str) -> Result<Option<Expr>, String> {
-        let spaced = text
-            .replace('(', " ( ")
-            .replace(')', " ) ")
-            .replace("&&", " && ")
-            .replace("||", " || ");
-        let mut toks: Vec<String> = Vec::new();
-        for w in spaced.split_whitespace() {
-            let w = w.to_lowercase();
-            if let Some(rest) = w.strip_prefix('!') {
-                toks.push("!".into());
-                if !rest.is_empty() {
-                    toks.push(rest.to_string());
-                }
-            } else {
-                toks.push(w);
-            }
+    /// True if evaluating needs GeoIP data.
+    pub fn uses_geo(&self) -> bool {
+        match self {
+            Expr::And(a, b) | Expr::Or(a, b) => a.uses_geo() || b.uses_geo(),
+            Expr::Not(a) => a.uses_geo(),
+            Expr::Asn { .. } | Expr::Cc { .. } | Expr::Org { .. } => true,
+            _ => false,
         }
+    }
+
+    pub fn parse(text: &str) -> Result<Option<Expr>, String> {
+        let toks = tokenize(text)?;
         if toks.is_empty() {
             return Ok(None);
         }
@@ -193,6 +202,42 @@ impl Expr {
         }
         Ok(Some(e))
     }
+}
+
+/// Words, parentheses, `! && ||`, and "quoted strings" (one token each).
+fn tokenize(text: &str) -> Result<Vec<String>, String> {
+    let c: Vec<char> = text.chars().collect();
+    let mut toks = Vec::new();
+    let mut i = 0;
+    while i < c.len() {
+        let ch = c[i];
+        let pair = |i: usize, a: char| i + 1 < c.len() && c[i] == a && c[i + 1] == a;
+        if ch.is_whitespace() {
+            i += 1;
+        } else if ch == '(' || ch == ')' || ch == '!' {
+            toks.push(ch.to_string());
+            i += 1;
+        } else if pair(i, '&') || pair(i, '|') {
+            toks.push(format!("{ch}{ch}"));
+            i += 2;
+        } else if ch == '"' || ch == '\'' {
+            let end = c[i + 1..].iter().position(|&x| x == ch).ok_or("unterminated quote")?;
+            toks.push(c[i + 1..i + 1 + end].iter().collect::<String>().to_lowercase());
+            i += end + 2;
+        } else {
+            let start = i;
+            while i < c.len()
+                && !c[i].is_whitespace()
+                && !matches!(c[i], '(' | ')' | '"' | '\'')
+                && !pair(i, '&')
+                && !pair(i, '|')
+            {
+                i += 1;
+            }
+            toks.push(c[start..i].iter().collect::<String>().to_lowercase());
+        }
+    }
+    Ok(toks)
 }
 
 struct Parser<'a> {
@@ -249,6 +294,17 @@ impl<'a> Parser<'a> {
         let w = self.next().ok_or("expected address")?;
         Cidr::parse(w)
     }
+    fn geo_term(&mut self, w: &str, local: bool) -> Result<Expr, String> {
+        let v = self.next().ok_or(format!("expected a value after '{w}'"))?;
+        Ok(match w {
+            "asn" | "as" => {
+                let n = v.strip_prefix("as").unwrap_or(v);
+                Expr::Asn { local, asn: n.parse().map_err(|_| format!("bad AS number '{v}'"))? }
+            }
+            "cc" | "country" => Expr::Cc { local, cc: v.to_string() },
+            _ => Expr::Org { local, org: v.to_string() },
+        })
+    }
     fn port(&mut self) -> Result<u16, String> {
         let w = self.next().ok_or("expected port")?;
         w.parse().map_err(|_| format!("bad port '{w}'"))
@@ -264,6 +320,10 @@ impl<'a> Parser<'a> {
                         let p = self.port()?;
                         if local { Expr::LPort(p) } else { Expr::RPort(p) }
                     }
+                    Some(g @ ("asn" | "as" | "cc" | "country" | "org")) => {
+                        self.i += 1;
+                        self.geo_term(g, local)?
+                    }
                     Some("host") | Some("net") => {
                         self.i += 1;
                         let c = self.cidr()?;
@@ -275,6 +335,7 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
+            "asn" | "as" | "cc" | "country" | "org" => self.geo_term(w, false)?,
             "port" => Expr::Port(self.port()?),
             "sport" | "lport" => Expr::LPort(self.port()?),
             "dport" | "rport" => Expr::RPort(self.port()?),
@@ -305,12 +366,14 @@ impl<'a> Parser<'a> {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Filter {
     pub expr: Option<Expr>,
     pub text: String,
     pub scope: Scope,
     pub internal_nets: Vec<Cidr>,
+    /// For asn / cc / org terms.
+    pub geo: Option<Arc<Geo>>,
 }
 
 impl Filter {
@@ -321,7 +384,7 @@ impl Filter {
             Scope::External => !(is_internal(&k.local, nets) && is_internal(&k.remote, nets)),
             Scope::Internal => is_internal(&k.local, nets) && is_internal(&k.remote, nets),
         };
-        ok && self.expr.as_ref().map_or(true, |e| e.eval(k, nets))
+        ok && self.expr.as_ref().map_or(true, |e| e.eval(k, nets, self.geo.as_deref()))
     }
 }
 
@@ -346,7 +409,7 @@ mod tests {
     #[test]
     fn exprs() {
         let k = key("198.51.100.7", 22, "8.8.8.8", 50000, 6);
-        let t = |s: &str| Expr::parse(s).unwrap().unwrap().eval(&k, &[]);
+        let t = |s: &str| Expr::parse(s).unwrap().unwrap().eval(&k, &[], None);
         assert!(t("tcp port 22"));
         assert!(t("tcp and not udp"));
         assert!(!t("udp or port 80"));
@@ -354,6 +417,21 @@ mod tests {
         assert!(t("!(port 80 || port 443)"));
         assert!(t("external"));
         assert!(Expr::parse("host").is_err());
+        // No GeoIP loaded: geo terms never match.
+        assert!(!t("asn 15169"));
+        assert!(t("not cc us"));
+    }
+
+    #[test]
+    fn tokens() {
+        assert_eq!(tokenize("!(tcp&&port 22)||udp").unwrap(), ["!", "(", "tcp", "&&", "port", "22", ")", "||", "udp"]);
+        assert_eq!(tokenize(r#"org "University of Warsaw" and cc PL"#).unwrap(), ["org", "university of warsaw", "and", "cc", "pl"]);
+        assert!(tokenize("org \"oops").is_err());
+        let e = Expr::parse("dst asn AS15169 or src org 'acme' or cc pl").unwrap().unwrap();
+        assert!(e.uses_geo());
+        assert!(matches!(Expr::parse("as15169"), Err(_)));
+        assert!(matches!(Expr::parse("asn as15169").unwrap(), Some(Expr::Asn { local: false, asn: 15169 })));
+        assert!(matches!(Expr::parse("src cc pl").unwrap(), Some(Expr::Cc { local: true, .. })));
     }
 
     #[test]

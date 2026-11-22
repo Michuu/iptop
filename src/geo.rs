@@ -34,6 +34,8 @@ pub struct GeoInfo {
     pub city: Option<String>,
     pub asn: Option<u32>,
     pub as_org: Option<String>,
+    /// Network block of the lookup, e.g. "142.250.0.0/15" (from the ASN db if present).
+    pub net: Option<String>,
 }
 
 impl GeoInfo {
@@ -220,7 +222,7 @@ impl Geo {
         // Under sudo, also search the invoking user's real home (it is not
         // always /home/<user>, e.g. qlab -> /home/lab).
         if let Ok(u) = std::env::var("SUDO_USER") {
-            if let Some(h) = user_home(&u) {
+            if let Some(h) = crate::util::user_home(&u) {
                 homes.push(h);
             }
         }
@@ -267,7 +269,11 @@ impl Geo {
         }
         let mut g = GeoInfo::default();
         for (_, r) in &self.readers {
-            let Ok(rec) = r.lookup::<Rec>(*ip) else { continue };
+            let Ok((rec, plen)) = r.lookup_prefix::<Rec>(*ip) else { continue };
+            // The ASN database's block is the more meaningful one (≈ the routed prefix).
+            if g.net.is_none() || (g.asn.is_none() && rec.autonomous_system_number.is_some()) {
+                g.net = Some(network(ip, plen));
+            }
             let country = rec.country.or(rec.registered_country);
             if let Some(c) = country {
                 if g.cc.is_none() {
@@ -293,22 +299,32 @@ impl Geo {
     }
 }
 
-/// Home directory of `user` from the passwd database (works with musl too).
-fn user_home(user: &str) -> Option<PathBuf> {
-    let c = std::ffi::CString::new(user).ok()?;
-    unsafe {
-        let pw = libc::getpwnam(c.as_ptr());
-        if pw.is_null() || (*pw).pw_dir.is_null() {
-            return None;
+/// "a.b.c.d/len" for the block of `len` bits containing `ip`.
+fn network(ip: &IpAddr, len: usize) -> String {
+    match ip {
+        IpAddr::V4(a) => {
+            let len = len.min(32);
+            let m = if len == 0 { 0 } else { u32::MAX << (32 - len) };
+            format!("{}/{len}", std::net::Ipv4Addr::from(u32::from(*a) & m))
         }
-        let dir = std::ffi::CStr::from_ptr((*pw).pw_dir).to_string_lossy().into_owned();
-        Some(PathBuf::from(dir))
+        IpAddr::V6(a) => {
+            let len = len.min(128);
+            let m = if len == 0 { 0 } else { u128::MAX << (128 - len) };
+            format!("{}/{len}", std::net::Ipv6Addr::from(u128::from(*a) & m))
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn networks() {
+        assert_eq!(network(&"142.250.74.14".parse().unwrap(), 15), "142.250.0.0/15");
+        assert_eq!(network(&"8.8.8.8".parse().unwrap(), 32), "8.8.8.8/32");
+        assert_eq!(network(&"2001:db8:1234::1".parse().unwrap(), 32), "2001:db8::/32");
+    }
 
     #[test]
     fn formats() {
@@ -318,6 +334,7 @@ mod tests {
             city: Some("Warsaw".into()),
             asn: Some(8501),
             as_org: Some("PSNC".into()),
+            net: None,
         };
         assert_eq!(GeoFmt::Short.render(&g), "PL AS8501 PSNC");
         assert_eq!(GeoFmt::Org.render(&g), "PL PSNC");
@@ -332,11 +349,5 @@ mod tests {
             f = f.next();
         }
         assert_eq!(f, GeoFmt::Short);
-    }
-
-    #[test]
-    fn home_lookup() {
-        assert_eq!(super::user_home("root"), Some(std::path::PathBuf::from("/root")));
-        assert_eq!(super::user_home("no-such-user-iptop"), None);
     }
 }

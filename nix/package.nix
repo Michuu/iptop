@@ -18,7 +18,7 @@ rustPlatform.buildRustPackage {
   cargoLock.lockFile = ../Cargo.lock;
 
   # The build sandbox's passwd has no real home for root.
-  checkFlags = [ "--skip=geo::tests::home_lookup" ];
+  checkFlags = [ "--skip=util::tests::home_lookup" ];
 
   meta = {
     description = cargoToml.package.description;

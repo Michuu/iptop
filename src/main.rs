@@ -1,5 +1,6 @@
 mod app;
 mod capture;
+mod config;
 mod filter;
 mod geo;
 mod probe;
@@ -17,7 +18,7 @@ use ratatui::crossterm::execute;
 /// Most iftop keys work (press h inside). Needs root or
 /// `setcap cap_net_raw,cap_net_admin=eip` on the binary.
 #[derive(Parser, Debug)]
-#[command(name = "iptop", version, about, long_about = None)]
+#[command(name = "iptop", version, about, long_about = None, args_override_self = true)]
 pub struct Args {
     /// Interface to listen on ("any" for all). Default: the default-route interface
     #[arg(short = 'i', long)]
@@ -70,10 +71,16 @@ pub struct Args {
     /// Geo column: short, org, asn, place, full, off (key G cycles)
     #[arg(long, value_name = "FMT", default_value = "short")]
     pub geo_format: String,
+    /// Config file with default options (default: ~/.config/iptop/config)
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<String>,
+    /// Ignore the config file
+    #[arg(long)]
+    pub no_config: bool,
 }
 
 fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    let args = parse_args();
     // A capability wrapper (e.g. NixOS security.wrappers) hands us
     // cap_net_raw/cap_net_admin as ambient capabilities, which every child
     // would inherit. Drop them so the PATH-resolved ping/traceroute we spawn
@@ -88,4 +95,24 @@ fn main() -> anyhow::Result<()> {
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     res
+}
+
+/// Command line with the config file's options inserted in front, so that
+/// options given on the command line win.
+fn parse_args() -> Args {
+    let argv: Vec<String> = std::env::args().collect();
+    let (from_cfg, path) = config::load(&argv);
+    let mut all = vec![argv[0].clone()];
+    all.extend(from_cfg);
+    all.extend(argv[1..].iter().cloned());
+    match Args::try_parse_from(&all) {
+        Ok(a) => a,
+        Err(e) => {
+            use clap::error::ErrorKind;
+            if let Some(p) = path.filter(|_| !matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion)) {
+                eprintln!("note: options were also read from {}", p.display());
+            }
+            e.exit()
+        }
+    }
 }

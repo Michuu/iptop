@@ -574,7 +574,15 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let keys: &[(&str, &str)] = if app.host.is_some() {
-        &[("esc", "back"), ("j/k", "prev/next host"), ("tab", "local↔remote"), ("G", "geo"), ("r", "restart probes")]
+        &[
+            ("esc", "back"),
+            ("j/k", "prev/next host"),
+            ("tab", "local↔remote"),
+            ("e/E", "hide/only"),
+            ("y", "copy"),
+            ("G", "geo"),
+            ("r", "restart probes"),
+        ]
     } else {
         &[
             ("h", "help"),
@@ -586,6 +594,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
             ("t", "lines"),
             ("p", "ports"),
             ("s/d", "aggr"),
+            ("e/E", "hide/only"),
             ("G", "geo"),
             ("P", "pause"),
             ("q", "quit"),
@@ -642,7 +651,9 @@ fn draw_help(f: &mut Frame, area: Rect) {
                 ("tab / l", "host panel: probe the remote ↔ local host"),
                 ("i  [  ]", "interface picker / previous / next interface"),
                 ("x", "scope: all → external only → internal only"),
+                ("e / E", "filter out this host / show only this host"),
                 ("F", "clear filter and search"),
+                ("y / Y", "copy IP / hostname to the clipboard"),
                 ("G", "geo (table + traceroute): AS+org → org → AS → city → city+AS → off"),
                 ("g", "toggle traffic graph"),
                 ("+ / -", "update interval 100ms … 10s (like btop)"),
@@ -658,6 +669,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
                 ("port N", "either side;  src port N, dst port N"),
                 ("tcp udp icmp", "protocols;  proto N;  ip / ip6"),
                 ("external", "has an external peer;  internal"),
+                ("asn cc org", "peer's GeoIP: asn 15169, cc PL, org \"google llc\""),
                 ("not and or ()", "e.g. tcp and not (port 22 or port 443)"),
             ],
         ),
@@ -760,12 +772,12 @@ fn draw_host(f: &mut Frame, area: Rect, app: &App) {
     t.push(Span::styled(if h.local { "  local side" } else { "  remote side" }, Style::new().fg(DIM)));
     t.push(Span::raw(" "));
     let block = panel(Line::from(t)).title_bottom(
-        Line::from(" esc back · j/k prev/next · tab/l local↔remote · G geo · r restart probes ").right_aligned(),
+        Line::from(" esc back · j/k prev/next · tab/l local↔remote · e/E hide/only · y/Y copy · G geo · r restart ").right_aligned(),
     );
     let inner = block.inner(r);
     f.render_widget(block, r);
 
-    let [top, ping, bottom] = Layout::vertical([Constraint::Length(8), Constraint::Length(7), Constraint::Min(5)]).areas(inner);
+    let [top, ping, bottom] = Layout::vertical([Constraint::Length(9), Constraint::Length(7), Constraint::Min(5)]).areas(inner);
     let [info, traffic] = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(top);
     let [trace, flows] = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)]).areas(bottom);
 
@@ -787,6 +799,9 @@ fn draw_host(f: &mut Frame, area: Rect, app: &App) {
             }
             if !g.as_text().is_empty() {
                 lines.push(kv("ASN", g.as_text(), TX_C));
+            }
+            if let Some(n) = &g.net {
+                lines.push(kv("network", n.clone(), DIM));
             }
         }
         None => lines.push(kv("geo", if app.geo.available() { "unknown".into() } else { "no GeoIP db".into() }, DIM)),
