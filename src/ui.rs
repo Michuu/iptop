@@ -5,6 +5,7 @@ use crate::filter::Scope;
 use crate::geo::GeoFmt;
 use crate::theme::th;
 use crate::util::{self, fit, fmt_bytes, fmt_dur, fmt_rate, has_ports};
+use crate::views::View;
 use ratatui::buffer::Buffer;
 use std::collections::HashMap;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -510,10 +511,14 @@ fn spark_line(buf: &mut Buffer, x: u16, y: u16, w: usize, data: &[u64]) {
 }
 
 fn bar_frac(app: &App, v: f64) -> f64 {
+    bar_frac_max(app, v, app.scale)
+}
+
+fn bar_frac_max(app: &App, v: f64, max: f64) -> f64 {
     if v <= 0.0 {
         return 0.0;
     }
-    let max = app.scale.max(1.0);
+    let max = max.max(1.0);
     if app.log_scale {
         let min = 125.0; // 1 kbit/s
         if v <= min {
@@ -573,11 +578,7 @@ fn pair_label(app: &App, r: &Row, w: usize, arrow: &str, show_remote: bool) -> S
 
 fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
     let n = app.rows.len();
-    let block = panel(Line::from(vec![
-        Span::raw(" "),
-        Span::styled("hosts", Style::new().fg(th().fg).bold()),
-        Span::styled(format!(" {n} "), Style::new().fg(th().dim)),
-    ]))
+    let block = panel(view_tabs(app, area))
     .title_bottom(Line::from(vec![Span::styled(
         format!(
             " bars {}s {} · {} ",
@@ -590,6 +591,16 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height < 2 {
+        return;
+    }
+    if app.view != View::Hosts {
+        app.row_hits.clear();
+        app.header_hits = (inner.y, Vec::new());
+        match app.view {
+            View::Log => draw_log(f, area, inner, app),
+            View::Ifaces => draw_ifs(f, area, inner, app),
+            _ => draw_aggs(f, area, inner, app),
+        }
         return;
     }
     let c = columns(inner, app);
@@ -737,12 +748,279 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
             app.row_hits.push((y2, idx));
         }
     }
-    // scrollbar hint
+    scroll_hint(buf, area, app.offset, visible, n);
+}
+
+fn scroll_hint(buf: &mut Buffer, area: Rect, off: usize, visible: usize, n: usize) {
     if n > visible {
-        let pos = format!(" {}-{}/{} ", app.offset + 1, (app.offset + visible).min(n), n);
-        let x = area.x + area.width.saturating_sub(pos.len() as u16 + 2);
+        let pos = format!(" {}-{}/{} ", off + 1, (off + visible).min(n), n);
+        let x = area.x + area.width.saturating_sub(pos.chars().count() as u16 + 2);
         buf.set_string(x, area.y, pos, Style::new().fg(th().dim));
     }
+}
+
+/// The table title: one tab per view (clickable), the active one with its row count.
+fn view_tabs(app: &mut App, area: Rect) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    let mut x = area.x + 2;
+    let mut hits = Vec::new();
+    for (i, v) in View::ALL.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" │ ", Style::new().fg(th().border)));
+            x += 3;
+        }
+        let text = if *v == app.view { format!("{} {}", v.name(), app.view_len()) } else { v.name().to_string() };
+        let w = text.chars().count() as u16;
+        let st = if *v == app.view { Style::new().fg(th().accent).bold() } else { Style::new().fg(th().dim) };
+        spans.push(Span::styled(text, st));
+        hits.push((x, x + w, *v));
+        x += w;
+    }
+    spans.push(Span::raw(" "));
+    app.tab_hits = (area.y, hits);
+    Line::from(spans)
+}
+
+/// Keep `sel` visible in `visible` rows starting at `off`.
+fn scroll_to(sel: usize, off: &mut usize, visible: usize, n: usize) {
+    if sel < *off {
+        *off = sel;
+    } else if sel >= *off + visible {
+        *off = sel + 1 - visible;
+    }
+    *off = (*off).min(n.saturating_sub(visible));
+}
+
+fn sel_row(buf: &mut Buffer, inner: Rect, y: u16) {
+    buf.set_style(Rect::new(inner.x, y, inner.width, 1), Style::new().bg(th().sel_bg));
+    buf.set_string(inner.x, y, "▌", Style::new().fg(th().accent));
+}
+
+/// Services, countries or networks.
+fn draw_aggs(f: &mut Frame, area: Rect, inner: Rect, app: &mut App) {
+    let n = app.aggs.len();
+    let visible = (inner.height - 1) as usize;
+    scroll_to(app.vsel, &mut app.voff, visible, n);
+    let w = inner.width as usize;
+    let num_w = 9;
+    let ncols = if app.show_totals { 4 } else { 3 };
+    let spark_w = if w > 120 { SPARK } else if w > 95 { 16 } else { 0 };
+    let label_w = 14;
+    let count_w = 7;
+    let right = num_w * ncols + if spark_w > 0 { spark_w + 1 } else { 0 } + 2 * count_w;
+    let label_x = inner.x + 2;
+    let detail_x = label_x + label_w as u16 + 1;
+    let detail_w = w.saturating_sub(2 + label_w + 1 + right + 1);
+    let hosts_x = detail_x + detail_w as u16 + 1;
+    let flows_x = hosts_x + count_w as u16;
+    let spark_x = flows_x + count_w as u16 + 1;
+    let num_x = spark_x + if spark_w > 0 { spark_w as u16 + 1 } else { 0 };
+
+    let buf = f.buffer_mut();
+    let hs = Style::new().fg(th().dim).bold();
+    let on = Style::new().fg(th().accent).bold().underlined();
+    let arrow = sort_arrow(app);
+    let (lh, dh) = match app.view {
+        View::Services => ("service", "proto/port"),
+        View::Countries => ("country", "name"),
+        _ => ("network", "organisation"),
+    };
+    let by_label = !app.sort.descending();
+    let mut hits = Vec::new();
+    let mut head = |buf: &mut Buffer, x: u16, w: usize, text: &str, s: Option<Sort>, cur: bool| {
+        let t = if cur { format!("{text} {arrow}") } else { text.to_string() };
+        let t = if x >= hosts_x { format!("{t:>w$}") } else { t };
+        buf.set_stringn(x, inner.y, &t, w, if cur { on } else { hs });
+        if let Some(s) = s {
+            hits.push((x, x + w as u16, s));
+        }
+    };
+    head(buf, label_x, label_w, lh, Some(Sort::Dst), by_label);
+    head(buf, detail_x, detail_w, dh, None, false);
+    head(buf, hosts_x, count_w, "hosts", None, false);
+    head(buf, flows_x, count_w, "flows", Some(Sort::Flows), app.sort == Sort::Flows);
+    if spark_w > 0 {
+        buf.set_stringn(spark_x, inner.y, format!("last {spark_w}s"), spark_w, hs);
+    }
+    let hdrs = [format!("{}s", app.windows[0]), format!("{}s", app.windows[1]), format!("{}s", app.windows[2]), "total".into()];
+    for (i, h) in hdrs.iter().take(ncols).enumerate() {
+        let s = if i == 3 { Sort::Total } else { Sort::Col(i) };
+        head(buf, num_x + (i * num_w) as u16, num_w, h, Some(s), app.sort == s);
+    }
+    app.header_hits = (inner.y, hits);
+
+    if n == 0 {
+        buf.set_string(label_x, inner.y + 2, "waiting for traffic…", Style::new().fg(th().dim).italic());
+        return;
+    }
+    let bi = app.bar_interval;
+    let max = app.aggs.iter().map(|a| a.sent[bi] + a.recv[bi]).fold(0.0, f64::max);
+    let b = app.bytes;
+    for (vi, idx) in (app.voff..n).take(visible).enumerate() {
+        let a = &app.aggs[idx];
+        let y = inner.y + 1 + vi as u16;
+        let sel = idx == app.vsel;
+        if sel {
+            sel_row(buf, inner, y);
+        }
+        if app.show_bars {
+            let tot = a.sent[bi] + a.recv[bi];
+            let bw = (label_w + 1 + detail_w) as f64;
+            let wb = (bar_frac_max(app, tot, max) * bw).round() as u16;
+            let wr = if tot > 0.0 { (wb as f64 * a.recv[bi] / tot).round() as u16 } else { 0 };
+            buf.set_style(Rect::new(label_x, y, wr, 1), Style::new().bg(th().rx_bar));
+            buf.set_style(Rect::new(label_x + wr, y, wb - wr, 1), Style::new().bg(th().tx_bar));
+        }
+        let text = if sel { Style::new().fg(th().bright).bold() } else { Style::new().fg(th().fg) };
+        buf.set_stringn(label_x, y, fit(&a.label, label_w), label_w, text.bold());
+        buf.set_stringn(detail_x, y, fit(&a.detail, detail_w), detail_w, Style::new().fg(th().dim));
+        buf.set_string(hosts_x, y, format!("{:>count_w$}", a.hosts), text);
+        buf.set_string(flows_x, y, format!("{:>count_w$}", a.nflows), Style::new().fg(th().dim));
+        if spark_w > 0 {
+            spark_line(buf, spark_x, y, spark_w, &a.spark);
+        }
+        let vals = match app.line_mode {
+            LineMode::Sent => a.sent,
+            LineMode::Recv => a.recv,
+            _ => [a.sent[0] + a.recv[0], a.sent[1] + a.recv[1], a.sent[2] + a.recv[2]],
+        };
+        for (i, v) in vals.iter().enumerate() {
+            let st = if *v < 0.5 { Style::new().fg(th().border) } else { text };
+            buf.set_string(num_x + (i * num_w) as u16, y, format!("{:>num_w$}", fmt_rate(*v, b)), st);
+        }
+        if app.show_totals {
+            buf.set_string(num_x + (3 * num_w) as u16, y, format!("{:>num_w$}", fmt_bytes(a.tot_sent + a.tot_recv)), Style::new().fg(th().dim));
+        }
+        app.row_hits.push((y, idx));
+    }
+    buf.set_stringn(
+        inner.x + 2,
+        area.y + area.height - 1,
+        " ⏎ filter the hosts view to this row ",
+        inner.width as usize / 2,
+        Style::new().fg(th().dim),
+    );
+    scroll_hint(buf, area, app.voff, visible, n);
+}
+
+/// Hosts in the order they first appeared, newest first.
+fn draw_log(f: &mut Frame, area: Rect, inner: Rect, app: &mut App) {
+    let n = app.log.entries.len();
+    let visible = (inner.height - 1) as usize;
+    scroll_to(app.vsel, &mut app.voff, visible, n);
+    // Current rate of each remote host.
+    let mut now: HashMap<std::net::IpAddr, f64> = HashMap::new();
+    for r in &app.rows {
+        if let Some(ip) = r.key.remote {
+            *now.entry(ip).or_default() += r.sent[0] + r.recv[0];
+        }
+    }
+    let w = inner.width as usize;
+    let x0 = inner.x + 2;
+    let host_w = (w.saturating_sub(2 + 9 + 22 + 10) * 45 / 100).max(16);
+    let geo_w = w.saturating_sub(2 + 9 + host_w + 1 + 22 + 10);
+    let (host_x, svc_x) = (x0 + 9, x0 + 9 + host_w as u16 + 1);
+    let geo_x = svc_x + 22;
+    let rate_x = geo_x + geo_w as u16;
+    let buf = f.buffer_mut();
+    let hs = Style::new().fg(th().dim).bold();
+    buf.set_string(x0, inner.y, "seen", hs);
+    buf.set_string(host_x, inner.y, "host", hs);
+    buf.set_string(svc_x, inner.y, "first service", hs);
+    buf.set_stringn(geo_x, inner.y, "geo / asn", geo_w, hs);
+    buf.set_string(rate_x, inner.y, format!("{:>9}", format!("{}s", app.windows[0])), hs);
+    if n == 0 {
+        buf.set_string(x0, inner.y + 2, "no hosts yet", Style::new().fg(th().dim).italic());
+        return;
+    }
+    let b = app.bytes;
+    for (vi, idx) in (app.voff..n).take(visible).enumerate() {
+        let e = &app.log.entries[idx];
+        let y = inner.y + 1 + vi as u16;
+        let sel = idx == app.vsel;
+        if sel {
+            sel_row(buf, inner, y);
+        }
+        let live = now.get(&e.ip).copied();
+        let rate = live.unwrap_or(0.0);
+        let text = if sel { Style::new().fg(th().bright).bold() } else if live.is_some() { Style::new().fg(th().fg) } else { Style::new().fg(th().dim) };
+        buf.set_string(x0, y, &e.time, Style::new().fg(th().dim));
+        let label = app.host_label(&e.ip);
+        buf.set_stringn(host_x, y, fit(&label, host_w), host_w, text);
+        buf.set_stringn(svc_x, y, fit(&e.service, 21), 21, Style::new().fg(th().tx));
+        buf.set_stringn(geo_x, y, fit(&e.geo, geo_w.saturating_sub(1)), geo_w.saturating_sub(1), Style::new().fg(th().dim));
+        let st = if rate < 0.5 { Style::new().fg(th().border) } else { Style::new().fg(th().rx) };
+        // idle: still has flows, just quiet; gone: no flows left (expired or filtered).
+        let shown = match live {
+            None => "gone".to_string(),
+            Some(r) if r < 0.5 => "idle".to_string(),
+            Some(r) => fmt_rate(r, b),
+        };
+        buf.set_string(rate_x, y, format!("{shown:>9}"), st);
+        app.row_hits.push((y, idx));
+    }
+    buf.set_stringn(
+        inner.x + 2,
+        area.y + area.height - 1,
+        " ⏎ host panel · e/E hide/only · y copy ",
+        inner.width as usize / 2,
+        Style::new().fg(th().dim),
+    );
+    scroll_hint(buf, area, app.voff, visible, n);
+}
+
+/// Every interface with its own rate history.
+fn draw_ifs(f: &mut Frame, area: Rect, inner: Rect, app: &mut App) {
+    let n = app.if_list.len();
+    let visible = (inner.height - 1) as usize;
+    scroll_to(app.vsel, &mut app.voff, visible, n);
+    let w = inner.width as usize;
+    let x0 = inner.x + 2;
+    let spark_w = ((w.saturating_sub(2 + 17 + 9 + 20 + 2)) / 2).clamp(8, 60);
+    let (state_x, rx_x) = (x0 + 17, x0 + 26);
+    let tx_x = rx_x + 10;
+    let srx_x = tx_x + 10;
+    let stx_x = srx_x + spark_w as u16 + 1;
+    let addr_x = stx_x + spark_w as u16 + 1;
+    let addr_w = (inner.x + inner.width).saturating_sub(addr_x) as usize;
+    let buf = f.buffer_mut();
+    let hs = Style::new().fg(th().dim).bold();
+    buf.set_string(x0, inner.y, "name", hs);
+    buf.set_string(state_x, inner.y, "state", hs);
+    buf.set_string(rx_x, inner.y, format!("{:>9} {:>9}", "↓ rx", "↑ tx"), hs);
+    buf.set_stringn(srx_x, inner.y, "rx history", spark_w, hs);
+    buf.set_stringn(stx_x, inner.y, "tx history", spark_w, hs);
+    buf.set_stringn(addr_x, inner.y, "addresses", addr_w, hs);
+    let b = app.bytes;
+    for (vi, idx) in (app.voff..n).take(visible).enumerate() {
+        let e = &app.if_list[idx];
+        let y = inner.y + 1 + vi as u16;
+        if idx == app.vsel {
+            sel_row(buf, inner, y);
+        }
+        let cur = e.name == app.iface;
+        let ns = if cur { Style::new().fg(th().accent).bold() } else { Style::new().fg(th().fg) };
+        buf.set_string(x0, y, fit(&format!("{}{}", e.name, if cur { " ●" } else { "" }), 16), ns);
+        let st = match e.state.as_str() {
+            "up" => Style::new().fg(th().rx),
+            "down" => Style::new().fg(th().err),
+            _ => Style::new().fg(th().dim),
+        };
+        buf.set_string(state_x, y, fit(&e.state, 8), st);
+        buf.set_string(rx_x, y, format!("{:>9}", fmt_rate(e.rx, b)), Style::new().fg(th().rx));
+        buf.set_string(tx_x, y, format!("{:>9}", fmt_rate(e.tx, b)), Style::new().fg(th().tx));
+        if let Some(h) = app.if_hist.hist.get(&e.name) {
+            let rx: Vec<u64> = h.iter().map(|v| v.0 as u64).collect();
+            let tx: Vec<u64> = h.iter().map(|v| v.1 as u64).collect();
+            spark_line(buf, srx_x, y, spark_w.min(rx.len()), &rx);
+            spark_line(buf, stx_x, y, spark_w.min(tx.len()), &tx);
+        }
+        let addrs: Vec<String> = e.addrs.iter().map(|a| a.to_string()).collect();
+        buf.set_stringn(addr_x, y, addrs.join(" "), addr_w, Style::new().fg(th().dim));
+        app.row_hits.push((y, idx));
+    }
+    buf.set_stringn(inner.x + 2, area.y + area.height - 1, " ⏎ capture on this interface ", inner.width as usize / 2, Style::new().fg(th().dim));
+    scroll_hint(buf, area, app.voff, visible, n);
 }
 
 // ------------------------------------------------------------------ footer
@@ -786,6 +1064,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         &[
             ("h", "help"),
             ("⏎", "host"),
+            ("tab", "views"),
             ("O", "sort"),
             ("␣", "follow"),
             ("i", "iface"),
@@ -852,6 +1131,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
             &[
                 ("⏎ / click", "host panel: geo, ASN, ping, traceroute, flows"),
                 ("tab / l", "host panel: probe the remote ↔ local host"),
+                ("tab / ⇧tab", "views: hosts, services, countries, networks, new hosts, interfaces"),
                 ("O / R", "sort menu (up, down, total, flows, ip, asn, …) / reverse"),
                 ("click header", "sort by that column; again to reverse"),
                 ("space", "follow the selected host as it moves (or stay in place)"),
@@ -881,24 +1161,40 @@ fn draw_help(f: &mut Frame, area: Rect) {
             ],
         ),
     ];
-    let mut lines = Vec::new();
-    for (name, keys) in sections {
-        lines.push(Line::from(Span::styled(format!(" {name}"), Style::new().fg(th().accent).bold())));
-        for (k, d) in keys.iter() {
-            lines.push(Line::from(vec![
-                Span::styled(format!("   {k:<15}"), Style::new().fg(th().warn)),
-                Span::styled(d.to_string(), Style::new().fg(th().fg)),
-            ]));
+    let render = |secs: &[&(&str, &[(&str, &str)])]| {
+        let mut lines = Vec::new();
+        for (name, keys) in secs {
+            lines.push(Line::from(Span::styled(format!(" {name}"), Style::new().fg(th().accent).bold())));
+            for (k, d) in keys.iter() {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("   {k:<15}"), Style::new().fg(th().warn)),
+                    Span::styled(d.to_string(), Style::new().fg(th().fg)),
+                ]));
+            }
+            lines.push(Line::raw(""));
         }
-        lines.push(Line::raw(""));
+        lines
+    };
+    let all: Vec<_> = sections.iter().collect();
+    let one = render(&all);
+    let block = panel(title("help")).title_bottom(Line::from(" any key to close ").right_aligned());
+    // Too tall for the terminal: iptop extras in a second column.
+    if one.len() as u16 + 2 > area.height && area.width >= 156 {
+        let left = render(&[&sections[0], &sections[2]]);
+        let right = render(&[&sections[1]]);
+        let h = left.len().max(right.len()) as u16 + 2;
+        let r = centered(area, 154, h);
+        f.render_widget(Clear, r);
+        let inner = block.inner(r);
+        f.render_widget(block, r);
+        let [lc, rc] = Layout::horizontal([Constraint::Length(76), Constraint::Min(10)]).areas(inner);
+        f.render_widget(Paragraph::new(left), lc);
+        f.render_widget(Paragraph::new(right), rc);
+        return;
     }
-    let h = lines.len() as u16 + 2;
-    let r = centered(area, 76, h);
+    let r = centered(area, 76, one.len() as u16 + 2);
     f.render_widget(Clear, r);
-    f.render_widget(
-        Paragraph::new(lines).block(panel(title("help")).title_bottom(Line::from(" any key to close ").right_aligned())),
-        r,
-    );
+    f.render_widget(Paragraph::new(one).block(block), r);
 }
 
 fn draw_ifaces(f: &mut Frame, area: Rect, app: &mut App) {

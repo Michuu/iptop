@@ -7,6 +7,7 @@ use crate::probe::Probe;
 use crate::resolver::Resolver;
 use crate::stats::{FlowKey, SharedStats, Stats, FLOW_HIST, TOTAL_HIST};
 use crate::util::{self, has_ports, Services};
+use crate::views::{self, Agg, IfHist, Log, View};
 use crate::Args;
 use anyhow::Result;
 use ratatui::crossterm::event::{
@@ -274,6 +275,18 @@ pub struct App {
     // extras
     pub show_graph: bool,
     pub map: MapMode,
+    /// What the table shows (Tab).
+    pub view: View,
+    pub aggs: Vec<Agg>,
+    agg_order: Vec<String>,
+    pub log: Log,
+    pub if_hist: IfHist,
+    pub if_list: Vec<IfaceEntry>,
+    /// Cursor and scroll of the non-host views.
+    pub vsel: usize,
+    pub voff: usize,
+    /// Table title: its row and the clickable view tabs (x0, x1, view).
+    pub tab_hits: (u16, Vec<(u16, u16, View)>),
     pub geo_fmt: GeoFmt,
     /// Host panel targets the local side of the selected row instead of the remote one.
     pub host_local: bool,
@@ -422,6 +435,15 @@ impl App {
             bytes: args.bytes,
             show_graph: true,
             map: MapMode::Off,
+            view: View::Hosts,
+            aggs: Vec::new(),
+            agg_order: Vec::new(),
+            log: Log::default(),
+            if_hist: IfHist::new(),
+            if_list: Vec::new(),
+            vsel: 0,
+            voff: 0,
+            tab_hits: (0, Vec::new()),
             windows,
             interval,
             peak_slot: 0,
@@ -563,6 +585,84 @@ impl App {
         self.follow.is_some() && !self.follow_auto
     }
 
+    fn sort_aggs(&mut self) {
+        let mut aggs = std::mem::take(&mut self.aggs);
+        let val = |x: &Agg, i: usize| match self.line_mode {
+            LineMode::Sent => x.sent[i],
+            LineMode::Recv => x.recv[i],
+            _ => x.sent[i] + x.recv[i],
+        };
+        aggs.sort_by(|a, b| {
+            let o = match self.sort {
+                Sort::Col(i) => val(b, i).total_cmp(&val(a, i)),
+                Sort::Sent => b.sent[0].total_cmp(&a.sent[0]),
+                Sort::Recv => b.recv[0].total_cmp(&a.recv[0]),
+                Sort::Total => (b.tot_sent + b.tot_recv).cmp(&(a.tot_sent + a.tot_recv)),
+                Sort::Flows => b.nflows.cmp(&a.nflows),
+                _ => a.label.cmp(&b.label),
+            };
+            if self.sort_rev { o.reverse() } else { o }.then_with(|| a.key.cmp(&b.key))
+        });
+        if self.frozen || self.held() {
+            let pos: HashMap<&String, usize> = self.agg_order.iter().enumerate().map(|(i, k)| (k, i)).collect();
+            aggs.sort_by_key(|a| pos.get(&a.key).copied().unwrap_or(usize::MAX));
+        }
+        self.agg_order = aggs.iter().map(|a| a.key.clone()).collect();
+        self.aggs = aggs;
+    }
+
+    /// Rows in the current non-host view.
+    pub fn view_len(&self) -> usize {
+        match self.view {
+            View::Hosts => self.rows.len(),
+            View::Services | View::Countries | View::Networks => self.aggs.len(),
+            View::Log => self.log.entries.len(),
+            View::Ifaces => self.if_list.len(),
+        }
+    }
+
+    fn set_view(&mut self, v: View) {
+        if v == self.view {
+            return;
+        }
+        self.view = v;
+        self.vsel = 0;
+        self.voff = 0;
+        self.aggs.clear();
+        self.agg_order.clear();
+        self.hold_until = None;
+        self.flash(format!("view: {}   (tab: next)", v.name()));
+    }
+
+    /// Enter in a non-host view.
+    fn view_enter(&mut self) {
+        match self.view {
+            View::Hosts => self.open_host(),
+            View::Services | View::Countries | View::Networks => {
+                let Some(a) = self.aggs.get(self.vsel) else { return };
+                match a.filter.clone() {
+                    Some(term) => {
+                        self.and_filter(&term);
+                        self.set_view(View::Hosts);
+                    }
+                    None => self.flash("no filter for this row"),
+                }
+            }
+            View::Log => {
+                if let Some(e) = self.log.entries.get(self.vsel) {
+                    let ip = e.ip;
+                    self.open_host_ip(ip, false);
+                }
+            }
+            View::Ifaces => {
+                if let Some(e) = self.if_list.get(self.vsel) {
+                    let n = e.name.clone();
+                    self.switch_iface(n);
+                }
+            }
+        }
+    }
+
     pub fn held(&self) -> bool {
         self.hold_until.is_some_and(|t| Instant::now() < t)
     }
@@ -577,7 +677,7 @@ impl App {
         }
     }
 
-    fn host_label(&self, ip: &IpAddr) -> String {
+    pub fn host_label(&self, ip: &IpAddr) -> String {
         if self.dns {
             if let Some(n) = self.resolver.lookup(ip) {
                 return n;
@@ -719,7 +819,32 @@ impl App {
             h.rate = rate;
             h.totals = totals;
         }
+        let before = self.log.entries.len();
+        self.log.update(&st, &self.geo, &self.services);
+        // New log entries go on top; keep a scrolled-down cursor on its entry.
+        let added = self.log.entries.len().saturating_sub(before);
+        if self.view == View::Log && self.vsel > 0 && added > 0 {
+            self.vsel += added;
+            self.voff += added;
+        }
+        if self.view.is_agg() {
+            self.aggs = views::build(self.view, &st, now, &self.windows, &self.geo, &self.services);
+        }
         drop(st);
+        self.sort_aggs();
+        self.if_hist.sample();
+        if self.view == View::Ifaces {
+            let addrs = util::iface_addrs();
+            self.if_list = util::list_ifaces()
+                .into_iter()
+                .map(|name| {
+                    let (rx, tx) = self.if_hist.hist.get(&name).and_then(|h| h.back().copied()).unwrap_or_default();
+                    IfaceEntry { state: util::operstate(&name), addrs: addrs.get(&name).cloned().unwrap_or_default(), name, rx, tx }
+                })
+                .collect();
+        }
+        let n = self.view_len();
+        self.vsel = self.vsel.min(n.saturating_sub(1));
 
         let mut rows: Vec<Row> = map.into_values().collect();
         for r in rows.iter_mut() {
@@ -838,6 +963,8 @@ impl App {
 
     fn reset_view(&mut self) {
         self.peak = (0.0, 0.0);
+        self.log.clear();
+        self.aggs.clear();
         self.rows.clear();
         self.order.clear();
         self.scale = 125.0;
@@ -866,6 +993,10 @@ impl App {
             self.follow = Some(r.key.clone());
             self.follow_auto = true;
         }
+        self.open_host_ip(ip, local);
+    }
+
+    fn open_host_ip(&mut self, ip: IpAddr, local: bool) {
         // Same target (e.g. j/k between rows sharing the local host): keep the running probes.
         if let Some(h) = self.host.as_mut().filter(|h| h.ip == ip) {
             h.local = local;
@@ -881,6 +1012,18 @@ impl App {
             rate: (0.0, 0.0),
             totals: (0, 0),
         });
+    }
+
+    /// j / k in the host panel: the next host of the hosts table or the log.
+    fn host_step(&mut self, d: i64) {
+        if self.view == View::Log {
+            self.nav(d);
+            self.dirty = true;
+            self.view_enter();
+        } else {
+            self.move_sel(d);
+            self.open_host();
+        }
     }
 
     /// Close the host panel; the next one opens on the remote side again.
@@ -914,14 +1057,26 @@ impl App {
         if let Some(h) = &self.host {
             return Some(h.ip);
         }
-        let r = self.rows.get(self.selected)?;
-        r.key.remote.or(r.key.local)
+        match self.view {
+            View::Hosts => {
+                let r = self.rows.get(self.selected)?;
+                r.key.remote.or(r.key.local)
+            }
+            View::Log => self.log.entries.get(self.vsel).map(|e| e.ip),
+            _ => None,
+        }
     }
 
     /// `e` hides the host, `E` shows only it; ANDed onto the current filter.
     fn quick_filter(&mut self, only: bool) {
         let Some(ip) = self.target_ip() else { return };
         let term = if only { format!("host {ip}") } else { format!("not host {ip}") };
+        self.and_filter(&term);
+    }
+
+    /// AND `term` onto the current filter.
+    fn and_filter(&mut self, term: &str) {
+        let term = term.to_string();
         let old = self.stats.lock().unwrap().filter.text.clone();
         let text = if old.is_empty() { term } else { format!("({old}) and {term}") };
         match Expr::parse(&text) {
@@ -969,7 +1124,12 @@ impl App {
     /// Navigation in the table: move without recomputing, and hold the row
     /// order for a moment so rows don't jump while scrolling.
     fn nav(&mut self, d: i64) {
-        self.move_sel(d);
+        if self.view == View::Hosts {
+            self.move_sel(d);
+        } else {
+            let n = self.view_len() as i64;
+            self.vsel = (self.vsel as i64 + d).clamp(0, (n - 1).max(0)) as usize;
+        }
         self.hold();
     }
 
@@ -980,6 +1140,8 @@ impl App {
 
     /// Back to the top: cursor on the first row, live order, no follow.
     fn go_top(&mut self) {
+        self.vsel = 0;
+        self.voff = 0;
         self.selected = 0;
         self.offset = 0;
         self.hold_until = None;
@@ -989,6 +1151,9 @@ impl App {
 
     /// Space: pin the cursor to the selected host, or unpin it.
     fn toggle_follow(&mut self) {
+        if self.view != View::Hosts {
+            return;
+        }
         if self.follow.is_some() && !self.follow_auto {
             self.follow = None;
             self.flash("cursor stays in place (top mode)");
@@ -1049,10 +1214,26 @@ impl App {
         match m.kind {
             MouseEventKind::ScrollDown => self.nav(3),
             MouseEventKind::ScrollUp => self.nav(-3),
+            MouseEventKind::Down(MouseButton::Left) if m.row == self.tab_hits.0 => {
+                let hit = self.tab_hits.1.iter().find(|(x0, x1, _)| m.column >= *x0 && m.column < *x1);
+                if let Some(&(_, _, v)) = hit {
+                    self.set_view(v);
+                }
+            }
             MouseEventKind::Down(MouseButton::Left) if m.row == self.header_hits.0 => {
                 let hit = self.header_hits.1.iter().find(|(x0, x1, _)| m.column >= *x0 && m.column < *x1);
                 if let Some(&(_, _, s)) = hit {
                     self.set_sort(s);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) if self.view != View::Hosts => {
+                if let Some(&(_, idx)) = self.row_hits.iter().find(|(y, _)| *y == m.row) {
+                    if self.vsel == idx {
+                        self.view_enter();
+                    } else {
+                        self.vsel = idx;
+                        self.hold();
+                    }
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
@@ -1179,14 +1360,8 @@ impl App {
                         h.probe = Probe::start(h.ip);
                     }
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.move_sel(1);
-                    self.open_host();
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.move_sel(-1);
-                    self.open_host();
-                }
+                KeyCode::Down | KeyCode::Char('j') => self.host_step(1),
+                KeyCode::Up | KeyCode::Char('k') => self.host_step(-1),
                 KeyCode::Tab | KeyCode::Char('l') => self.toggle_host_side(),
                 KeyCode::Char('e') => self.quick_filter(false),
                 KeyCode::Char('E') => self.quick_filter(true),
@@ -1301,6 +1476,8 @@ impl App {
                 self.sort_sel = Sort::MENU.iter().position(|s| *s == self.sort).unwrap_or(0);
             }
             KeyCode::Char(' ') => self.toggle_follow(),
+            KeyCode::Tab => self.set_view(self.view.step(1)),
+            KeyCode::BackTab => self.set_view(self.view.step(-1)),
             KeyCode::Char('t') => {
                 self.line_mode = match self.line_mode {
                     LineMode::Two => LineMode::One,
@@ -1389,7 +1566,7 @@ impl App {
             KeyCode::PageUp => self.nav(-20),
             KeyCode::Home => self.go_top(),
             KeyCode::End => self.nav(self.rows.len() as i64),
-            KeyCode::Enter => self.open_host(),
+            KeyCode::Enter => self.view_enter(),
             _ => {}
         }
         false

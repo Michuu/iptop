@@ -29,6 +29,9 @@ runs ping and traceroute.
   stays on its row number (top mode) or follows a host wherever it ranks (`space`). Sort by any
   column (click its header), or by sent, received, total, flows, IP, ASN or country (`O`).
 - **GeoIP + ASN** from MaxMind `.mmdb` files (GeoLite2 City/ASN, or ones patched with your own networks).
+- **Views** (`Tab`, or click the table's title): traffic per **service**, **country** and
+  **network** (ASN), a log of **new hosts** as they first appear, and all **interfaces** with their
+  own history. Enter on a service, country or network narrows the hosts view to it.
 - **World map** (`m`): a pixelated map where every located host glows with its traffic, beside the
   graph or big. The selected host blinks.
 - **Themes** (`c`, `--theme`): tokyo-night (default), dracula, nord, gruvbox, catppuccin,
@@ -159,6 +162,7 @@ filter = not port 22          # the value is the rest of the line
 | `n` / `N` | DNS / port names | `⏎` / click | **host panel**: geo, ASN, ping, traceroute, flows; `tab`/`l` switches remote ↔ local host |
 | | | `O` / `R` / click header | **sort menu** / reverse / sort by that column (again: reverse) |
 | | | `space` | follow the selected host as it moves / stay on the row number |
+| | | `tab` / `⇧tab` | views: hosts · services · countries · networks · new hosts · interfaces |
 | `s` / `d` | hide local / remote host | `i`, `[` `]` | interface picker / prev / next |
 | `S` `D` `p` | local / remote / all ports | `x` | scope: all → external → internal |
 | `t` | two-line / one-line / sent / recv | `e` / `E` | filter out this host / only this host |
@@ -173,6 +177,19 @@ filter = not port 22          # the value is the rest of the line
 | `f` | edit filter | `F` | clear filter + search |
 | `q` | quit | `y` / `Y` | copy IP / hostname (OSC 52, wl-copy, xclip) |
 | | | `h` / `?` | help |
+
+### Views
+
+| view | rows | ⏎ |
+|---|---|---|
+| hosts | host pairs (the classic iftop table) | host panel |
+| services | the well-known port of each flow (`tcp/443 https`), or the protocol | filter `tcp port 443` |
+| countries | the remote host's country; `internal` for your own networks | filter `cc PL` |
+| networks | the remote host's AS number and organisation | filter `asn 15169` |
+| new hosts | each remote host when first seen, its first service, and whether it is still talking | host panel |
+| interfaces | every interface's state, rates, rx/tx history and addresses | capture on it |
+
+All views use the current filter and scope, the sort keys and the bar/line settings.
 
 ### Scrolling, following and the time scale
 

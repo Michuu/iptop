@@ -9,6 +9,7 @@ mod stats;
 mod theme;
 mod ui;
 mod util;
+mod views;
 
 use clap::Parser;
 use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
