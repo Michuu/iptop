@@ -80,6 +80,9 @@ pub struct Args {
     /// Geo column: short, org, asn, place, full, off (key G cycles)
     #[arg(long, value_name = "FMT", default_value = "short")]
     pub geo_format: String,
+    /// World map: side (beside the graph, if there is room), big, off (key m cycles)
+    #[arg(long, value_name = "MODE", default_value = "side")]
+    pub map: String,
     /// Colour theme (key c cycles): tokyo-night, dracula, nord, gruvbox, catppuccin, solarized-light, mono, tty
     #[arg(long, value_name = "NAME")]
     pub theme: Option<String>,

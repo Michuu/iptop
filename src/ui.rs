@@ -487,10 +487,12 @@ fn graph_labels(buf: &mut Buffer, area: Rect, tmax: f64, bmax: f64, bytes: bool)
 
 fn draw_graph(f: &mut Frame, area: Rect, app: &App) {
     let [mut g, side] = Layout::horizontal([Constraint::Min(20), Constraint::Length(30)]).areas(area);
-    if app.map != MapMode::Off {
-        // Width that fits the map's aspect at this height (half-block pixels are square).
-        let want = (area.height.saturating_sub(2) as f32 * 2.0 * MAP_ASPECT) as u16 + 2;
-        let room_for_graph = app.show_graph && app.map == MapMode::Side && g.width >= want + 40;
+    // Width that fits the map's aspect at this height (half-block pixels are square).
+    let want = (area.height.saturating_sub(2) as f32 * 2.0 * MAP_ASPECT) as u16 + 2;
+    let room_for_graph = app.show_graph && app.map == MapMode::Side && g.width >= want + 40;
+    // The small map only joins the graph when both fit; it never pushes the graph out.
+    let side_only_squeezed = app.map == MapMode::Side && app.show_graph && !room_for_graph;
+    if app.map != MapMode::Off && !side_only_squeezed {
         let m = if room_for_graph {
             let [rest, m] = Layout::horizontal([Constraint::Min(40), Constraint::Length(want)]).areas(g);
             g = rest;

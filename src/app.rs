@@ -384,6 +384,13 @@ impl App {
                 .ok_or_else(|| anyhow::anyhow!("--theme: expected one of {}", crate::theme::names()))?;
             crate::theme::set(i);
         }
+        let map = match args.map.as_str() {
+            "side" | "on" | "small" => MapMode::Side,
+            "big" => MapMode::Big,
+            "off" | "none" => MapMode::Off,
+            _ => anyhow::bail!("--map: expected side, big or off"),
+        };
+        let map = if geo.available() { map } else { MapMode::Off };
         let line_mode = match args.lines.as_str() {
             "two" => LineMode::Two,
             "sent" => LineMode::Sent,
@@ -448,7 +455,8 @@ impl App {
             log_scale: true,
             bytes: args.bytes,
             show_graph: true,
-            map: MapMode::Off,
+            // Needs a City database for host positions.
+            map,
             map_dots: true,
             view: View::Hosts,
             aggs: Vec::new(),

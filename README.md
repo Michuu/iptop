@@ -34,7 +34,7 @@ runs ping and traceroute.
 - **Views** (`Tab`, or click the table's title): traffic per **process**, **service**, **country** and
   **network** (ASN), a log of **new hosts** as they first appear, and all **interfaces** with their
   own history. Enter on a service, country or network narrows the hosts view to it.
-- **World map** (`m`): every located host glows with its traffic, beside the graph or big, in fine
+- **World map** (`m`, on by default when wide enough): every located host glows with its traffic, beside the graph or big, in fine
   braille dots or chunky pixels (`M`). The selected host blinks.
 - **Themes** (`c`, `--theme`): tokyo-night (default), dracula, nord, gruvbox, catppuccin,
   solarized-light, mono, and tty for terminals with only 16 colours.
@@ -138,6 +138,7 @@ sudo iptop --scale slow -o total    # update every 5 s, sort by total bytes
 | `--geoip PATH` | `.mmdb` file or directory |
 | `--geo-format FMT` | geo column: `short` `org` `asn` `place` `full` `off` |
 | `--theme NAME` | colour theme (see Features) |
+| `--map side\|big\|off` | world map; `side` (default) sits beside the graph when the terminal is wide enough |
 | `--config PATH` / `--no-config` | use another config file / ignore it |
 
 ### Config file
