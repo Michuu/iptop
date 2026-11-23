@@ -4,6 +4,7 @@ use crate::capture::Capture;
 use crate::filter::{Cidr, Expr, Filter, Scope};
 use crate::geo::{Geo, GeoFmt};
 use crate::probe::Probe;
+use crate::procs::Procs;
 use crate::resolver::Resolver;
 use crate::stats::{FlowKey, SharedStats, Stats, FLOW_HIST, TOTAL_HIST};
 use crate::util::{self, has_ports, Services};
@@ -70,10 +71,11 @@ pub enum Sort {
     Ip,
     Asn,
     Country,
+    Process,
 }
 
 impl Sort {
-    pub const MENU: [Sort; 12] = [
+    pub const MENU: [Sort; 13] = [
         Sort::Col(0),
         Sort::Col(1),
         Sort::Col(2),
@@ -86,6 +88,7 @@ impl Sort {
         Sort::Ip,
         Sort::Asn,
         Sort::Country,
+        Sort::Process,
     ];
 
     pub fn parse(s: &str) -> Option<Sort> {
@@ -102,6 +105,7 @@ impl Sort {
             "ip" => Sort::Ip,
             "asn" => Sort::Asn,
             "country" | "cc" | "geo" => Sort::Country,
+            "process" | "proc" => Sort::Process,
             _ => return None,
         })
     }
@@ -123,6 +127,7 @@ impl Sort {
             Sort::Ip => "remote IP".into(),
             Sort::Asn => "ASN".into(),
             Sort::Country => "country".into(),
+            Sort::Process => "process".into(),
         }
     }
 }
@@ -180,6 +185,8 @@ pub struct Row {
     pub asn: Option<u32>,
     pub cc: Option<String>,
     pub loc: Option<(f32, f32)>,
+    /// Busiest owning process ("firefox", or "firefox +2" if several).
+    pub proc: String,
     pub sent: [f64; 3],
     pub recv: [f64; 3],
     pub tot_sent: u64,
@@ -198,6 +205,7 @@ impl Row {
             asn: None,
             cc: None,
             loc: None,
+            proc: String::new(),
             sent: [0.0; 3],
             recv: [0.0; 3],
             tot_sent: 0,
@@ -238,6 +246,7 @@ pub struct App {
     user_nets: Vec<Cidr>,
     pub resolver: Resolver,
     pub geo: Arc<Geo>,
+    pub procs: Arc<Procs>,
     services: Services,
 
     // iftop-style toggles
@@ -275,6 +284,8 @@ pub struct App {
     // extras
     pub show_graph: bool,
     pub map: MapMode,
+    /// Map in braille dots (finer) rather than half-block pixels.
+    pub map_dots: bool,
     /// What the table shows (Tab).
     pub view: View,
     pub aggs: Vec<Agg>,
@@ -350,6 +361,7 @@ impl App {
             scope: if args.external { Scope::External } else { Scope::All },
             internal_nets,
             geo: None,
+            procs: None,
         };
         let iface = args.interface.clone().unwrap_or_else(util::default_iface);
         let geo_fmt = GeoFmt::parse(&args.geo_format)
@@ -360,7 +372,8 @@ impl App {
             None => Geo::default_paths(),
         };
         let geo = Arc::new(Geo::load(&geo_paths));
-        let filter = Filter { geo: geo.available().then(|| geo.clone()), ..filter };
+        let procs = Procs::start();
+        let filter = Filter { geo: geo.available().then(|| geo.clone()), procs: Some(procs.clone()), ..filter };
         let stats: SharedStats = Arc::new(Mutex::new(Stats::new(filter)));
 
         let sort = Sort::parse(&args.order).ok_or_else(|| {
@@ -409,6 +422,7 @@ impl App {
             geo_fmt: if geo.available() { geo_fmt } else { GeoFmt::Off },
             host_local: false,
             geo,
+            procs,
             services: Services::load(),
             dns: !args.no_dns,
             port_names: !args.no_port_names,
@@ -435,6 +449,7 @@ impl App {
             bytes: args.bytes,
             show_graph: true,
             map: MapMode::Off,
+            map_dots: true,
             view: View::Hosts,
             aggs: Vec::new(),
             agg_order: Vec::new(),
@@ -576,6 +591,10 @@ impl App {
             Sort::Country => {
                 return none_last(&a.cc, &b.cc, rev).then_with(|| none_last(&a.asn, &b.asn, false));
             }
+            Sort::Process => {
+                let p = |r: &Row| (!r.proc.is_empty()).then(|| r.proc.clone());
+                return none_last(&p(a), &p(b), rev);
+            }
         };
         if rev { o.reverse() } else { o }
     }
@@ -615,7 +634,7 @@ impl App {
     pub fn view_len(&self) -> usize {
         match self.view {
             View::Hosts => self.rows.len(),
-            View::Services | View::Countries | View::Networks => self.aggs.len(),
+            View::Procs | View::Services | View::Countries | View::Networks => self.aggs.len(),
             View::Log => self.log.entries.len(),
             View::Ifaces => self.if_list.len(),
         }
@@ -638,7 +657,7 @@ impl App {
     fn view_enter(&mut self) {
         match self.view {
             View::Hosts => self.open_host(),
-            View::Services | View::Countries | View::Networks => {
+            View::Procs | View::Services | View::Countries | View::Networks => {
                 let Some(a) = self.aggs.get(self.vsel) else { return };
                 match a.filter.clone() {
                     Some(term) => {
@@ -754,6 +773,7 @@ impl App {
         // ----- rows
         let show_ports = self.show_lport || self.show_rport;
         let mut map: HashMap<RowKey, Row> = HashMap::new();
+        let mut row_procs: HashMap<RowKey, HashMap<String, f64>> = HashMap::new();
         let mut nflows = 0;
         for (k, f) in st.flows.iter() {
             if !st.filter.matches(k) {
@@ -768,6 +788,10 @@ impl App {
                 rport: (self.show_rport && ported).then_some(k.rport),
                 proto: show_ports.then_some(k.proto),
             };
+            if let Some(p) = self.procs.lookup(k) {
+                let (s, r) = f.hist.avg(now, self.windows[2]);
+                *row_procs.entry(rk.clone()).or_default().entry(p.name.clone()).or_default() += s + r + 1e-9;
+            }
             let row = map.entry(rk.clone()).or_insert_with(|| Row::new(rk));
             for (i, n) in self.windows.iter().enumerate() {
                 let (s, r) = f.hist.avg(now, *n);
@@ -786,6 +810,13 @@ impl App {
             row.nflows += 1;
         }
         self.nflows = nflows;
+        for (rk, procs) in row_procs {
+            if let Some(row) = map.get_mut(&rk) {
+                let top = procs.iter().max_by(|a, b| a.1.total_cmp(b.1)).map(|(n, _)| n.clone()).unwrap_or_default();
+                row.proc = if procs.len() > 1 { format!("{top} +{}", procs.len() - 1) } else { top };
+            }
+        }
+        self.procs.prune(|k| st.flows.contains_key(k));
 
         // ----- host panel data
         if let Some(h) = &mut self.host {
@@ -820,7 +851,7 @@ impl App {
             h.totals = totals;
         }
         let before = self.log.entries.len();
-        self.log.update(&st, &self.geo, &self.services);
+        self.log.update(&st, &self.geo, &self.services, &self.procs);
         // New log entries go on top; keep a scrolled-down cursor on its entry.
         let added = self.log.entries.len().saturating_sub(before);
         if self.view == View::Log && self.vsel > 0 && added > 0 {
@@ -828,7 +859,7 @@ impl App {
             self.voff += added;
         }
         if self.view.is_agg() {
-            self.aggs = views::build(self.view, &st, now, &self.windows, &self.geo, &self.services);
+            self.aggs = views::build(self.view, &st, now, &self.windows, &self.geo, &self.services, &self.procs);
         }
         drop(st);
         self.sort_aggs();
@@ -865,6 +896,7 @@ impl App {
                 r.local.to_lowercase().contains(&q)
                     || r.remote.to_lowercase().contains(&q)
                     || r.geo.to_lowercase().contains(&q)
+                    || r.proc.to_lowercase().contains(&q)
             });
         }
         rows.sort_by(|a, b| {
@@ -1542,6 +1574,10 @@ impl App {
                 } else {
                     self.flash(format!("map: {}", format!("{:?}", self.map).to_lowercase()));
                 }
+            }
+            KeyCode::Char('M') => {
+                self.map_dots = !self.map_dots;
+                self.flash(if self.map_dots { "map: braille dots" } else { "map: blocks" });
             }
             KeyCode::Char('c') => {
                 crate::theme::set(crate::theme::index() + 1);

@@ -11,6 +11,7 @@
 //!            | external | internal | CIDR | N (=port)
 
 use crate::geo::Geo;
+use crate::procs::Procs;
 use crate::stats::FlowKey;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -149,16 +150,29 @@ pub enum Expr {
     Cc { local: bool, cc: String },
     /// Case-insensitive substring of the AS organisation.
     Org { local: bool, org: String },
+    /// Case-insensitive substring of the owning process's name.
+    Proc(String),
+    Pid(u32),
+}
+
+/// What filter terms may look things up in.
+#[derive(Default, Clone, Copy)]
+pub struct Ctx<'a> {
+    pub geo: Option<&'a Geo>,
+    pub procs: Option<&'a Procs>,
 }
 
 impl Expr {
-    pub fn eval(&self, k: &FlowKey, nets: &[Cidr], geo: Option<&Geo>) -> bool {
+    pub fn eval(&self, k: &FlowKey, nets: &[Cidr], cx: &Ctx) -> bool {
         let side = |local: bool| if local { k.local } else { k.remote };
-        let info = |local: bool| geo.and_then(|g| g.lookup(&side(local)));
+        let info = |local: bool| cx.geo.and_then(|g| g.lookup(&side(local)));
+        let proc = || cx.procs.and_then(|p| p.lookup(k));
         match self {
-            Expr::And(a, b) => a.eval(k, nets, geo) && b.eval(k, nets, geo),
-            Expr::Or(a, b) => a.eval(k, nets, geo) || b.eval(k, nets, geo),
-            Expr::Not(a) => !a.eval(k, nets, geo),
+            Expr::And(a, b) => a.eval(k, nets, cx) && b.eval(k, nets, cx),
+            Expr::Or(a, b) => a.eval(k, nets, cx) || b.eval(k, nets, cx),
+            Expr::Not(a) => !a.eval(k, nets, cx),
+            Expr::Proc(name) => proc().is_some_and(|p| p.name.to_lowercase().contains(name.as_str())),
+            Expr::Pid(pid) => proc().is_some_and(|p| p.pid == *pid),
             Expr::Asn { local, asn } => info(*local).is_some_and(|g| g.asn == Some(*asn)),
             Expr::Cc { local, cc } => {
                 info(*local).is_some_and(|g| g.cc.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(cc)))
@@ -336,6 +350,14 @@ impl<'a> Parser<'a> {
                 }
             }
             "asn" | "as" | "cc" | "country" | "org" => self.geo_term(w, false)?,
+            "proc" | "process" => {
+                let v = self.next().ok_or("expected a process name after 'proc'")?;
+                Expr::Proc(v.to_lowercase())
+            }
+            "pid" => {
+                let v = self.next().ok_or("expected a pid")?;
+                Expr::Pid(v.parse().map_err(|_| format!("bad pid '{v}'"))?)
+            }
             "port" => Expr::Port(self.port()?),
             "sport" | "lport" => Expr::LPort(self.port()?),
             "dport" | "rport" => Expr::RPort(self.port()?),
@@ -374,6 +396,8 @@ pub struct Filter {
     pub internal_nets: Vec<Cidr>,
     /// For asn / cc / org terms.
     pub geo: Option<Arc<Geo>>,
+    /// For proc / pid terms.
+    pub procs: Option<Arc<Procs>>,
 }
 
 impl Filter {
@@ -384,7 +408,7 @@ impl Filter {
             Scope::External => !(is_internal(&k.local, nets) && is_internal(&k.remote, nets)),
             Scope::Internal => is_internal(&k.local, nets) && is_internal(&k.remote, nets),
         };
-        ok && self.expr.as_ref().map_or(true, |e| e.eval(k, nets, self.geo.as_deref()))
+        ok && self.expr.as_ref().map_or(true, |e| e.eval(k, nets, &Ctx { geo: self.geo.as_deref(), procs: self.procs.as_deref() }))
     }
 }
 
@@ -409,7 +433,7 @@ mod tests {
     #[test]
     fn exprs() {
         let k = key("198.51.100.7", 22, "8.8.8.8", 50000, 6);
-        let t = |s: &str| Expr::parse(s).unwrap().unwrap().eval(&k, &[], None);
+        let t = |s: &str| Expr::parse(s).unwrap().unwrap().eval(&k, &[], &Ctx::default());
         assert!(t("tcp port 22"));
         assert!(t("tcp and not udp"));
         assert!(!t("udp or port 80"));
@@ -431,6 +455,9 @@ mod tests {
         assert!(e.uses_geo());
         assert!(matches!(Expr::parse("as15169"), Err(_)));
         assert!(matches!(Expr::parse("asn as15169").unwrap(), Some(Expr::Asn { local: false, asn: 15169 })));
+        assert!(matches!(Expr::parse("proc Firefox").unwrap(), Some(Expr::Proc(n)) if n == "firefox"));
+        assert!(matches!(Expr::parse("pid 42").unwrap(), Some(Expr::Pid(42))));
+        assert!(Expr::parse("pid x").is_err());
         assert!(matches!(Expr::parse("src cc pl").unwrap(), Some(Expr::Cc { local: true, .. })));
     }
 

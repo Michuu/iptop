@@ -221,8 +221,44 @@ fn land_at(lat: f32, lon: f32) -> bool {
     LAND[i / 8] & (0x80 >> (i % 8)) != 0
 }
 
-/// Pixelated world map: land/sea in half-block pixels, each located host's
-/// traffic as a heat pixel (log scale), the selected host blinking.
+/// Land mask at a pixel grid of `pw` × `ph`, with the map centred: (mask,
+/// degrees per pixel, map width, map height, x offset, y offset). Cached per size.
+fn land_grid(pw: usize, ph: usize) -> std::rc::Rc<(Vec<bool>, f32, usize, usize, usize, usize)> {
+    thread_local! {
+        static CACHE: std::cell::RefCell<Option<((usize, usize), std::rc::Rc<(Vec<bool>, f32, usize, usize, usize, usize)>)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    if let Some(g) = CACHE.with(|c| c.borrow().as_ref().filter(|(k, _)| *k == (pw, ph)).map(|(_, g)| g.clone())) {
+        return g;
+    }
+    // Degrees per pixel, same on both axes.
+    let deg = (360.0 / pw as f32).max((MAP_N - MAP_S) / ph as f32);
+    let mw = ((360.0 / deg) as usize).min(pw);
+    let mh = (((MAP_N - MAP_S) / deg) as usize).min(ph);
+    let (ox, oy) = ((pw - mw) / 2, (ph - mh) / 2);
+    let mut mask = vec![false; pw * ph];
+    for y in 0..mh {
+        for x in 0..mw {
+            // Land if enough of a 3×3 sample of the pixel is.
+            let mut n = 0;
+            for sy in 0..3 {
+                for sx in 0..3 {
+                    let lat = MAP_N - (y as f32 + (sy as f32 + 0.5) / 3.0) * deg;
+                    let lon = -180.0 + (x as f32 + (sx as f32 + 0.5) / 3.0) * deg;
+                    n += land_at(lat, lon) as u32;
+                }
+            }
+            mask[(y + oy) * pw + x + ox] = n >= 4;
+        }
+    }
+    let g = std::rc::Rc::new((mask, deg, mw, mh, ox, oy));
+    CACHE.with(|c| *c.borrow_mut() = Some(((pw, ph), g.clone())));
+    g
+}
+
+/// World map: land in braille dots (fine outline, `M` switches) or half-block
+/// pixels, on the theme's background; each located host's traffic as a heat
+/// spot (log scale), the selected host blinking.
 fn draw_map(f: &mut Frame, area: Rect, app: &App) {
     let located = app.rows.iter().filter(|r| r.loc.is_some()).count();
     let block = panel(Line::from(vec![
@@ -235,12 +271,11 @@ fn draw_map(f: &mut Frame, area: Rect, app: &App) {
     if inner.width < 8 || inner.height < 3 {
         return;
     }
-    let (pw, ph) = (inner.width as usize, inner.height as usize * 2);
-    // Degrees per pixel, same on both axes; centre the map.
-    let deg = (360.0 / pw as f32).max((MAP_N - MAP_S) / ph as f32);
-    let mw = ((360.0 / deg) as usize).min(pw);
-    let mh = (((MAP_N - MAP_S) / deg) as usize).min(ph);
-    let (ox, oy) = ((pw - mw) / 2, (ph - mh) / 2);
+    let dots = app.map_dots;
+    let (sx, sy) = if dots { (2, 4) } else { (1, 2) };
+    let (pw, ph) = (inner.width as usize * sx, inner.height as usize * sy);
+    let grid = land_grid(pw, ph);
+    let (mask, deg, mw, mh, ox, oy) = (&grid.0, grid.1, grid.2, grid.3, grid.4, grid.5);
     let to_px = |lat: f32, lon: f32| -> Option<(usize, usize)> {
         if !(MAP_S..=MAP_N).contains(&lat) {
             return None;
@@ -250,28 +285,12 @@ fn draw_map(f: &mut Frame, area: Rect, app: &App) {
         Some((x, y))
     };
 
-    // Land: a pixel is land if enough of its 3×3 samples are.
-    let mut px = vec![th().bg.unwrap_or(Color::Reset); pw * ph];
-    for y in 0..mh {
-        for x in 0..mw {
-            let mut n = 0;
-            for sy in 0..3 {
-                for sx in 0..3 {
-                    let lat = MAP_N - (y as f32 + (sy as f32 + 0.5) / 3.0) * deg;
-                    let lon = -180.0 + (x as f32 + (sx as f32 + 0.5) / 3.0) * deg;
-                    n += land_at(lat, lon) as u32;
-                }
-            }
-            px[(y + oy) * pw + x + ox] = if n >= 3 { th().land } else { th().sea };
-        }
-    }
-
-    // Traffic heat per pixel over the bar window.
+    // Traffic heat per pixel over the bar window, as 0..1 on a log scale.
     let i = app.bar_interval;
     let mut heat: HashMap<(usize, usize), f64> = HashMap::new();
     for r in &app.rows {
-        if let Some((x, y)) = r.loc.and_then(|(la, lo)| to_px(la, lo)) {
-            *heat.entry((x, y)).or_default() += r.sent[i] + r.recv[i];
+        if let Some(p) = r.loc.and_then(|(la, lo)| to_px(la, lo)) {
+            *heat.entry(p).or_default() += r.sent[i] + r.recv[i];
         }
     }
     let max = heat.values().cloned().fold(0.0, f64::max).max(125.0);
@@ -279,8 +298,65 @@ fn draw_map(f: &mut Frame, area: Rect, app: &App) {
         .into_iter()
         .map(|(p, v)| (p, if v <= 1.0 { 0.0 } else { ((v / 125.0).max(1.0).log10() / (max / 125.0).log10().max(0.1)).clamp(0.0, 1.0) }))
         .collect();
-    // Coolest first so the hottest pixel and glow win where they overlap.
-    hot.sort_by(|a, b| a.1.total_cmp(&b.1));
+    hot.sort_by(|a, b| a.1.total_cmp(&b.1)); // hottest drawn last
+    let blink = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() / 400) % 2 == 0;
+    let sel = app.rows.get(app.selected).and_then(|r| r.loc).and_then(|(la, lo)| to_px(la, lo)).filter(|_| blink);
+
+    let bg = th().bg.unwrap_or(Color::Reset);
+    let buf = f.buffer_mut();
+    if dots {
+        // Braille: per cell a 2×4 dot pattern, one colour.
+        const BITS: [[u32; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
+        let (cw, ch) = (inner.width as usize, inner.height as usize);
+        let mut bits = vec![0u32; cw * ch];
+        let mut col: Vec<Option<(Color, f64)>> = vec![None; cw * ch];
+        for y in 0..ph {
+            for x in 0..pw {
+                if mask[y * pw + x] {
+                    bits[(y / 4) * cw + x / 2] |= BITS[y % 4][x % 2];
+                }
+            }
+        }
+        let mut spot = |x: usize, y: usize, c: Color, rank: f64, r: i32| {
+            // A small blob of dots around the host, and its cell in the heat colour.
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                    if nx >= 0 && ny >= 0 && (nx as usize) < pw && (ny as usize) < ph {
+                        let (nx, ny) = (nx as usize, ny as usize);
+                        let ci = (ny / 4) * cw + nx / 2;
+                        bits[ci] |= BITS[ny % 4][nx % 2];
+                        if col[ci].is_none_or(|(_, k)| k <= rank) {
+                            col[ci] = Some((c, rank));
+                        }
+                    }
+                }
+            }
+        };
+        for &((x, y), t) in &hot {
+            spot(x, y, grad(Pal::Heat, t), t, 1);
+        }
+        if let Some((x, y)) = sel {
+            spot(x, y, th().bright, 2.0, 1);
+        }
+        for cy in 0..ch {
+            for cx in 0..cw {
+                let b = bits[cy * cw + cx];
+                let Some(c) = buf.cell_mut((inner.x + cx as u16, inner.y + cy as u16)) else { continue };
+                c.set_bg(bg);
+                if b == 0 {
+                    c.set_symbol(" ");
+                    continue;
+                }
+                let fg = col[cy * cw + cx].map_or(th().border, |(c, _)| c);
+                c.set_char(char::from_u32(0x2800 + b).unwrap_or(' ')).set_fg(fg);
+            }
+        }
+        return;
+    }
+
+    // Half blocks: two square pixels per cell, land / sea / heat colours.
+    let mut px: Vec<Color> = mask.iter().map(|l| if *l { th().land } else { bg }).collect();
     for &((x, y), t) in &hot {
         // A soft glow on the four neighbours keeps single pixels visible.
         let c = grad(Pal::Heat, t);
@@ -288,35 +364,26 @@ fn draw_map(f: &mut Frame, area: Rect, app: &App) {
             let (nx, ny) = (x as i32 + dx, y as i32 + dy);
             if nx >= 0 && ny >= 0 && (nx as usize) < pw && (ny as usize) < ph {
                 let i = ny as usize * pw + nx as usize;
-                px[i] = mix(px[i], c, 0.45);
+                // Over the terminal's own background (unknown colour) blend with land instead.
+                let under = if px[i] == Color::Reset { th().land } else { px[i] };
+                px[i] = mix(under, c, 0.45);
             }
         }
     }
     for &((x, y), t) in &hot {
         px[y * pw + x] = grad(Pal::Heat, t);
     }
-    // Selected host, blinking.
-    let blink = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() / 400)
-        % 2
-        == 0;
-    if let Some((x, y)) = app.rows.get(app.selected).and_then(|r| r.loc).and_then(|(la, lo)| to_px(la, lo)) {
-        if blink {
-            px[y * pw + x] = th().bright;
-        }
+    if let Some((x, y)) = sel {
+        px[y * pw + x] = th().bright;
     }
-
-    let buf = f.buffer_mut();
     for cy in 0..inner.height as usize {
         for cx in 0..pw {
             let (top, bot) = (px[2 * cy * pw + cx], px[(2 * cy + 1) * pw + cx]);
             if let Some(c) = buf.cell_mut((inner.x + cx as u16, inner.y + cy as u16)) {
-                // Reset = no colour (letterbox, or the tty theme's sea): never
-                // draw it as a foreground block.
+                // Reset = the terminal's background: never draw it as a foreground block.
                 match (top == Color::Reset, bot == Color::Reset) {
-                    (true, true) => c.set_symbol(" "),
-                    (true, false) => c.set_symbol("▄").set_fg(bot),
+                    (true, true) => c.set_symbol(" ").set_bg(bg),
+                    (true, false) => c.set_symbol("▄").set_fg(bot).set_bg(bg),
                     (false, _) => c.set_symbol("▀").set_fg(top).set_bg(bot),
                 };
             }
@@ -533,6 +600,8 @@ fn bar_frac_max(app: &App, v: f64, max: f64) -> f64 {
 struct Cols {
     label_x: u16,
     label_w: usize,
+    proc_x: u16,
+    proc_w: usize,
     geo_x: u16,
     geo_w: usize,
     spark_x: u16,
@@ -550,13 +619,20 @@ fn columns(inner: Rect, app: &App) -> Cols {
     let spark_w = if w > 120 { SPARK } else if w > 95 { 16 } else { 0 };
     let wide = if app.geo_fmt == GeoFmt::Full { 40 } else { 30 };
     let geo_w = if app.geo_fmt == GeoFmt::Off || w < 90 { 0 } else if w > 150 { wide } else { 20 };
-    let fixed = 2 + nums + if spark_w > 0 { spark_w + 2 } else { 0 } + if geo_w > 0 { geo_w + 1 } else { 0 };
+    // Process column only when some row has a process (not on a router).
+    let proc_w = if w > 130 && app.rows.iter().any(|r| !r.proc.is_empty()) { 16 } else { 0 };
+    let fixed = 2
+        + nums
+        + if spark_w > 0 { spark_w + 2 } else { 0 }
+        + if geo_w > 0 { geo_w + 1 } else { 0 }
+        + if proc_w > 0 { proc_w + 1 } else { 0 };
     let label_w = w.saturating_sub(fixed).max(10);
     let label_x = inner.x + 2;
-    let geo_x = label_x + label_w as u16 + 1;
+    let proc_x = label_x + label_w as u16 + 1;
+    let geo_x = proc_x + if proc_w > 0 { proc_w as u16 + 1 } else { 0 };
     let spark_x = geo_x + if geo_w > 0 { geo_w as u16 + 1 } else { 0 };
     let num_x = spark_x + if spark_w > 0 { spark_w as u16 + 1 } else { 0 };
-    Cols { label_x, label_w, geo_x, geo_w, spark_x, spark_w, num_x, num_w, ncols }
+    Cols { label_x, label_w, proc_x, proc_w, geo_x, geo_w, spark_x, spark_w, num_x, num_w, ncols }
 }
 
 fn pair_label(app: &App, r: &Row, w: usize, arrow: &str, show_remote: bool) -> String {
@@ -626,6 +702,9 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
         let half = c.label_w.saturating_sub(3) / 2;
         head(buf, c.label_x, half, "local", Sort::Src, false);
         head(buf, c.label_x + half as u16 + 3, c.label_w.saturating_sub(half + 3), "remote", Sort::Dst, false);
+    }
+    if c.proc_w > 0 {
+        head(buf, c.proc_x, c.proc_w, "process", Sort::Process, false);
     }
     if c.geo_w > 0 {
         let gs = if matches!(app.geo_fmt, GeoFmt::Place) { Sort::Country } else { Sort::Asn };
@@ -723,6 +802,10 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
             ),
         };
         buf.set_stringn(c.label_x, y, pair_label(app, r, c.label_w, arrow1, true), c.label_w, text);
+        if c.proc_w > 0 {
+            let ps = if sel { text } else { Style::new().fg(th().warn) };
+            buf.set_stringn(c.proc_x, y, fit(&r.proc, c.proc_w), c.proc_w, ps);
+        }
         if c.geo_w > 0 {
             buf.set_stringn(c.geo_x, y, fit(&r.geo, c.geo_w), c.geo_w, Style::new().fg(th().dim));
         }
@@ -821,6 +904,7 @@ fn draw_aggs(f: &mut Frame, area: Rect, inner: Rect, app: &mut App) {
     let on = Style::new().fg(th().accent).bold().underlined();
     let arrow = sort_arrow(app);
     let (lh, dh) = match app.view {
+        View::Procs => ("process", "user · pids"),
         View::Services => ("service", "proto/port"),
         View::Countries => ("country", "name"),
         _ => ("network", "organisation"),
@@ -893,10 +977,15 @@ fn draw_aggs(f: &mut Frame, area: Rect, inner: Rect, app: &mut App) {
         }
         app.row_hits.push((y, idx));
     }
+    let partial = app.view == View::Procs && *app.procs.partial.lock().unwrap();
     buf.set_stringn(
         inner.x + 2,
         area.y + area.height - 1,
-        " ⏎ filter the hosts view to this row ",
+        if partial {
+            " ⏎ filter the hosts view to this row · not root: other users' processes are hidden "
+        } else {
+            " ⏎ filter the hosts view to this row "
+        },
         inner.width as usize / 2,
         Style::new().fg(th().dim),
     );
@@ -917,16 +1006,16 @@ fn draw_log(f: &mut Frame, area: Rect, inner: Rect, app: &mut App) {
     }
     let w = inner.width as usize;
     let x0 = inner.x + 2;
-    let host_w = (w.saturating_sub(2 + 9 + 22 + 10) * 45 / 100).max(16);
-    let geo_w = w.saturating_sub(2 + 9 + host_w + 1 + 22 + 10);
+    let host_w = (w.saturating_sub(2 + 9 + 28 + 10) * 45 / 100).max(16);
+    let geo_w = w.saturating_sub(2 + 9 + host_w + 1 + 28 + 10);
     let (host_x, svc_x) = (x0 + 9, x0 + 9 + host_w as u16 + 1);
-    let geo_x = svc_x + 22;
+    let geo_x = svc_x + 28;
     let rate_x = geo_x + geo_w as u16;
     let buf = f.buffer_mut();
     let hs = Style::new().fg(th().dim).bold();
     buf.set_string(x0, inner.y, "seen", hs);
     buf.set_string(host_x, inner.y, "host", hs);
-    buf.set_string(svc_x, inner.y, "first service", hs);
+    buf.set_string(svc_x, inner.y, "first service · process", hs);
     buf.set_stringn(geo_x, inner.y, "geo / asn", geo_w, hs);
     buf.set_string(rate_x, inner.y, format!("{:>9}", format!("{}s", app.windows[0])), hs);
     if n == 0 {
@@ -947,7 +1036,8 @@ fn draw_log(f: &mut Frame, area: Rect, inner: Rect, app: &mut App) {
         buf.set_string(x0, y, &e.time, Style::new().fg(th().dim));
         let label = app.host_label(&e.ip);
         buf.set_stringn(host_x, y, fit(&label, host_w), host_w, text);
-        buf.set_stringn(svc_x, y, fit(&e.service, 21), 21, Style::new().fg(th().tx));
+        let svc = if e.proc.is_empty() { e.service.clone() } else { format!("{} · {}", e.service, e.proc) };
+        buf.set_stringn(svc_x, y, fit(&svc, 27), 27, Style::new().fg(th().tx));
         buf.set_stringn(geo_x, y, fit(&e.geo, geo_w.saturating_sub(1)), geo_w.saturating_sub(1), Style::new().fg(th().dim));
         let st = if rate < 0.5 { Style::new().fg(th().border) } else { Style::new().fg(th().rx) };
         // idle: still has flows, just quiet; gone: no flows left (expired or filtered).
@@ -1131,7 +1221,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
             &[
                 ("⏎ / click", "host panel: geo, ASN, ping, traceroute, flows"),
                 ("tab / l", "host panel: probe the remote ↔ local host"),
-                ("tab / ⇧tab", "views: hosts, services, countries, networks, new hosts, interfaces"),
+                ("tab / ⇧tab", "views: hosts, processes, services, countries, networks, new, ifaces"),
                 ("O / R", "sort menu (up, down, total, flows, ip, asn, …) / reverse"),
                 ("click header", "sort by that column; again to reverse"),
                 ("space", "follow the selected host as it moves (or stay in place)"),
@@ -1142,7 +1232,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
                 ("y / Y", "copy IP / hostname to the clipboard"),
                 ("G", "geo (table + traceroute): AS+org → org → AS → city → city+AS → off"),
                 ("g", "toggle traffic graph"),
-                ("m", "world map: off → beside the graph → big"),
+                ("m / M", "world map: off → beside the graph → big / dots ↔ blocks"),
                 ("c", "colour theme: tokyo-night, dracula, nord, gruvbox, …"),
                 ("+ / -", "time scale: update 1/2/5/10 s, averages 1/5/20 … 10/60/300 s"),
                 ("u", "bits ↔ bytes"),
@@ -1157,6 +1247,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
                 ("tcp udp icmp", "protocols;  proto N;  ip / ip6"),
                 ("external", "has an external peer;  internal"),
                 ("asn cc org", "peer's GeoIP: asn 15169, cc PL, org \"google llc\""),
+                ("proc / pid", "owning process: proc firefox, pid 1234"),
                 ("not and or ()", "e.g. tcp and not (port 22 or port 443)"),
             ],
         ),
@@ -1488,11 +1579,14 @@ fn draw_host(f: &mut Frame, area: Rect, app: &App) {
                 p.to_string()
             }
         };
-        let desc = if has_ports(k.proto) {
+        let mut desc = if has_ports(k.proto) {
             format!("{} {}→{}", util::proto_name(k.proto), port(k.lport), port(k.rport))
         } else {
             util::proto_name(k.proto)
         };
+        if let Some(p) = app.procs.lookup(k) {
+            desc = format!("{desc:<24} {} ({})", p.name, p.pid);
+        }
         let dw = fi.width.saturating_sub(30) as usize;
         buf.set_stringn(fi.x + 1, y, fit(&desc, dw), dw, Style::new().fg(th().fg));
         let x = fi.x + 1 + dw as u16;

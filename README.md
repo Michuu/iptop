@@ -29,11 +29,13 @@ runs ping and traceroute.
   stays on its row number (top mode) or follows a host wherever it ranks (`space`). Sort by any
   column (click its header), or by sent, received, total, flows, IP, ASN or country (`O`).
 - **GeoIP + ASN** from MaxMind `.mmdb` files (GeoLite2 City/ASN, or ones patched with your own networks).
-- **Views** (`Tab`, or click the table's title): traffic per **service**, **country** and
+- **Per-process traffic** like nethogs: a process column, a processes view, and `proc` / `pid`
+  filter terms. Short connections stay attributed after they close; containers count too.
+- **Views** (`Tab`, or click the table's title): traffic per **process**, **service**, **country** and
   **network** (ASN), a log of **new hosts** as they first appear, and all **interfaces** with their
   own history. Enter on a service, country or network narrows the hosts view to it.
-- **World map** (`m`): a pixelated map where every located host glows with its traffic, beside the
-  graph or big. The selected host blinks.
+- **World map** (`m`): every located host glows with its traffic, beside the graph or big, in fine
+  braille dots or chunky pixels (`M`). The selected host blinks.
 - **Themes** (`c`, `--theme`): tokyo-night (default), dracula, nord, gruvbox, catppuccin,
   solarized-light, mono, and tty for terminals with only 16 colours.
 - **Host panel** (Enter or click): live ping with a loss graph, a traceroute where every hop
@@ -162,7 +164,7 @@ filter = not port 22          # the value is the rest of the line
 | `n` / `N` | DNS / port names | `⏎` / click | **host panel**: geo, ASN, ping, traceroute, flows; `tab`/`l` switches remote ↔ local host |
 | | | `O` / `R` / click header | **sort menu** / reverse / sort by that column (again: reverse) |
 | | | `space` | follow the selected host as it moves / stay on the row number |
-| | | `tab` / `⇧tab` | views: hosts · services · countries · networks · new hosts · interfaces |
+| | | `tab` / `⇧tab` | views: hosts · processes · services · countries · networks · new hosts · interfaces |
 | `s` / `d` | hide local / remote host | `i`, `[` `]` | interface picker / prev / next |
 | `S` `D` `p` | local / remote / all ports | `x` | scope: all → external → internal |
 | `t` | two-line / one-line / sent / recv | `e` / `E` | filter out this host / only this host |
@@ -171,7 +173,7 @@ filter = not port 22          # the value is the rest of the line
 | `b` / `B` | bars / bar window | `u` | bits ↔ bytes |
 | `L` | log / linear bars | `r` | reset stats |
 | `T` | cumulative totals | `+` / `-` | time scale (below) |
-| | | `m` / `c` | world map (off / beside graph / big) / colour theme |
+| | | `m` / `M` / `c` | world map (off / beside graph / big) / dots ↔ blocks / colour theme |
 | `P` | pause | `j k ↑ ↓ PgUp PgDn End` | move the cursor; `Home` back to the top |
 | `l` or `/` | screen search | | |
 | `f` | edit filter | `F` | clear filter + search |
@@ -183,6 +185,7 @@ filter = not port 22          # the value is the rest of the line
 | view | rows | ⏎ |
 |---|---|---|
 | hosts | host pairs (the classic iftop table) | host panel |
+| processes | the local process that owns each flow, grouped by name; `—` for traffic with no local socket | filter `proc 'firefox'` |
 | services | the well-known port of each flow (`tcp/443 https`), or the protocol | filter `tcp port 443` |
 | countries | the remote host's country; `internal` for your own networks | filter `cc PL` |
 | networks | the remote host's AS number and organisation | filter `asn 15169` |
@@ -190,6 +193,11 @@ filter = not port 22          # the value is the rest of the line
 | interfaces | every interface's state, rates, rx/tx history and addresses | capture on it |
 
 All views use the current filter and scope, the sort keys and the bar/line settings.
+
+Processes come from `/proc`: each flow's socket is found in `/proc/<pid>/net/{tcp,udp}{,6}` (once per
+network namespace, so containers count) and matched to its process through `/proc/<pid>/fd`. This
+needs root to see every user's processes, and only covers this machine's own sockets: forwarded or
+promiscuous traffic shows as `—`. A brand-new connection is attributed within a couple of seconds.
 
 ### Scrolling, following and the time scale
 
@@ -218,6 +226,7 @@ port N                 either side          src port N, dst port N
 tcp udp icmp sctp gre esp   proto N   ip   ip6
 external               has a non-internal end      internal    both ends internal
 asn N   cc XX   org "TEXT"   GeoIP of the remote peer (src asn … for the local side)
+proc NAME   pid N            owning process (part of the name, ignoring case)
 not ! and && or || ( )                      juxtaposition means "and"
 ```
 

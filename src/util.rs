@@ -220,6 +220,17 @@ pub fn user_home(user: &str) -> Option<std::path::PathBuf> {
     }
 }
 
+/// Login name of a uid (the number if unknown).
+pub fn user_name(uid: u32) -> String {
+    unsafe {
+        let pw = libc::getpwuid(uid);
+        if pw.is_null() || (*pw).pw_name.is_null() {
+            return uid.to_string();
+        }
+        CStr::from_ptr((*pw).pw_name).to_string_lossy().into_owned()
+    }
+}
+
 fn base64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();

@@ -4,6 +4,7 @@
 use crate::app::SPARK;
 use crate::filter::is_internal;
 use crate::geo::Geo;
+use crate::procs::Procs;
 use crate::stats::{FlowKey, Stats};
 use crate::util::{self, has_ports, Services};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -13,6 +14,7 @@ use std::time::Instant;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum View {
     Hosts,
+    Procs,
     Services,
     Countries,
     Networks,
@@ -21,11 +23,12 @@ pub enum View {
 }
 
 impl View {
-    pub const ALL: [View; 6] = [View::Hosts, View::Services, View::Countries, View::Networks, View::Log, View::Ifaces];
+    pub const ALL: [View; 7] = [View::Hosts, View::Procs, View::Services, View::Countries, View::Networks, View::Log, View::Ifaces];
 
     pub fn name(self) -> &'static str {
         match self {
             View::Hosts => "hosts",
+            View::Procs => "processes",
             View::Services => "services",
             View::Countries => "countries",
             View::Networks => "networks",
@@ -40,7 +43,7 @@ impl View {
     }
 
     pub fn is_agg(self) -> bool {
-        matches!(self, View::Services | View::Countries | View::Networks)
+        matches!(self, View::Procs | View::Services | View::Countries | View::Networks)
     }
 }
 
@@ -61,9 +64,14 @@ pub struct Agg {
 }
 
 /// The aggregation key, label, detail and filter of a flow in `view`.
-fn agg_key(view: View, k: &FlowKey, st: &Stats, geo: &Geo, services: &Services) -> (String, String, String, Option<String>) {
+fn agg_key(view: View, k: &FlowKey, st: &Stats, geo: &Geo, services: &Services, procs: &Procs) -> (String, String, String, Option<String>) {
     let internal = || is_internal(&k.remote, &st.filter.internal_nets);
     match view {
+        View::Procs => match procs.lookup(k) {
+            // Grouped by name (all curl runs together); the detail lists the pids.
+            Some(p) => (p.name.clone(), p.name.clone(), format!("{} · {}", p.user, p.pid), Some(format!("proc '{}'", p.name))),
+            None => ("~none".into(), "—".into(), "no local process (forwarded, ended, or not visible)".into(), None),
+        },
         View::Services => {
             let proto = util::proto_name(k.proto);
             if !has_ports(k.proto) {
@@ -100,13 +108,13 @@ fn agg_key(view: View, k: &FlowKey, st: &Stats, geo: &Geo, services: &Services) 
 }
 
 /// Aggregate the filtered flows for an aggregate view.
-pub fn build(view: View, st: &Stats, now: u64, windows: &[u64; 3], geo: &Geo, services: &Services) -> Vec<Agg> {
+pub fn build(view: View, st: &Stats, now: u64, windows: &[u64; 3], geo: &Geo, services: &Services, procs: &Procs) -> Vec<Agg> {
     let mut map: HashMap<String, (Agg, HashSet<IpAddr>)> = HashMap::new();
     for (k, f) in st.flows.iter() {
         if !st.filter.matches(k) {
             continue;
         }
-        let (key, label, detail, filter) = agg_key(view, k, st, geo, services);
+        let (key, label, detail, filter) = agg_key(view, k, st, geo, services, procs);
         let (a, hosts) = map.entry(key.clone()).or_insert_with(|| {
             (
                 Agg {
@@ -126,6 +134,16 @@ pub fn build(view: View, st: &Stats, now: u64, windows: &[u64; 3], geo: &Geo, se
             )
         });
         hosts.insert(k.remote);
+        if view == View::Procs && a.key != "~none" {
+            // detail is "user · pid pid …"; add this flow's pid if new.
+            if let Some(p) = procs.lookup(k) {
+                let pid = p.pid.to_string();
+                if !a.detail.split(' ').any(|w| w == pid) {
+                    a.detail.push(' ');
+                    a.detail.push_str(&pid);
+                }
+            }
+        }
         a.nflows += 1;
         for (i, n) in windows.iter().enumerate() {
             let (s, r) = f.hist.avg(now, *n);
@@ -157,6 +175,8 @@ pub struct LogEntry {
     /// First flow's service, e.g. "tcp/443 https".
     pub service: String,
     pub geo: String,
+    /// Process of the first flow, if known yet.
+    pub proc: String,
 }
 
 pub const LOG_MAX: usize = 2000;
@@ -170,7 +190,7 @@ pub struct Log {
 
 impl Log {
     /// Record remote hosts of filtered flows that weren't seen before.
-    pub fn update(&mut self, st: &Stats, geo: &Geo, services: &Services) {
+    pub fn update(&mut self, st: &Stats, geo: &Geo, services: &Services, procs: &Procs) {
         let mut new: Vec<&FlowKey> = st.flows.keys().filter(|k| !self.seen.contains(&k.remote) && st.filter.matches(k)).collect();
         new.sort_by_key(|k| (k.remote, k.rport));
         for k in new {
@@ -194,6 +214,7 @@ impl Log {
                 ip: k.remote,
                 service: service.trim().to_string(),
                 geo: geo.lookup(&k.remote).map(|g| g.short()).unwrap_or_default(),
+                proc: procs.lookup(k).map(|p| p.name.clone()).unwrap_or_default(),
             });
         }
         self.entries.truncate(LOG_MAX);
@@ -245,7 +266,7 @@ mod tests {
 
     #[test]
     fn view_cycle() {
-        assert_eq!(View::Hosts.step(1), View::Services);
+        assert_eq!(View::Hosts.step(1), View::Procs);
         assert_eq!(View::Hosts.step(-1), View::Ifaces);
         let mut v = View::Hosts;
         for _ in 0..View::ALL.len() {

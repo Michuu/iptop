@@ -4,6 +4,7 @@ mod config;
 mod filter;
 mod geo;
 mod probe;
+mod procs;
 mod resolver;
 mod stats;
 mod theme;

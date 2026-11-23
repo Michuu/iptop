@@ -28,9 +28,8 @@ pub struct Theme {
     pub rx_grad: [Rgb; 3],
     pub tx_grad: [Rgb; 3],
     pub heat_grad: [Rgb; 3],
-    /// World map: land and sea pixels.
+    /// World map land (block style); the sea is the background.
     pub land: Color,
-    pub sea: Color,
 }
 
 const fn rgb(c: Rgb) -> Color {
@@ -58,7 +57,6 @@ pub const THEMES: &[Theme] = &[
         tx_grad: [(90, 180, 235), (130, 120, 245), (225, 100, 220)],
         heat_grad: [(60, 110, 200), (230, 200, 70), (245, 80, 80)],
         land: rgb((44, 50, 74)),
-        sea: rgb((22, 24, 36)),
     },
     Theme {
         name: "dracula",
@@ -80,7 +78,6 @@ pub const THEMES: &[Theme] = &[
         tx_grad: [(139, 233, 253), (189, 147, 249), (255, 121, 198)],
         heat_grad: [(98, 114, 164), (241, 250, 140), (255, 85, 85)],
         land: rgb((68, 71, 90)),
-        sea: rgb((33, 34, 44)),
     },
     Theme {
         name: "nord",
@@ -102,7 +99,6 @@ pub const THEMES: &[Theme] = &[
         tx_grad: [(129, 161, 193), (180, 142, 173), (208, 135, 112)],
         heat_grad: [(94, 129, 172), (235, 203, 139), (191, 97, 106)],
         land: rgb((67, 76, 94)),
-        sea: rgb((38, 43, 53)),
     },
     Theme {
         name: "gruvbox",
@@ -124,7 +120,6 @@ pub const THEMES: &[Theme] = &[
         tx_grad: [(131, 165, 152), (211, 134, 155), (254, 128, 25)],
         heat_grad: [(69, 133, 136), (250, 189, 47), (251, 73, 52)],
         land: rgb((80, 73, 69)),
-        sea: rgb((29, 32, 33)),
     },
     Theme {
         name: "catppuccin",
@@ -146,7 +141,6 @@ pub const THEMES: &[Theme] = &[
         tx_grad: [(137, 220, 235), (203, 166, 247), (245, 194, 231)],
         heat_grad: [(116, 199, 236), (249, 226, 175), (243, 139, 168)],
         land: rgb((69, 71, 90)),
-        sea: rgb((24, 24, 37)),
     },
     Theme {
         name: "solarized-light",
@@ -168,7 +162,6 @@ pub const THEMES: &[Theme] = &[
         tx_grad: [(42, 161, 152), (108, 113, 196), (211, 54, 130)],
         heat_grad: [(38, 139, 210), (181, 137, 0), (220, 50, 47)],
         land: rgb((222, 214, 190)),
-        sea: rgb((245, 238, 218)),
     },
     Theme {
         name: "mono",
@@ -190,7 +183,6 @@ pub const THEMES: &[Theme] = &[
         tx_grad: [(90, 90, 90), (160, 160, 160), (230, 230, 230)],
         heat_grad: [(90, 90, 90), (180, 180, 180), (255, 255, 255)],
         land: rgb((58, 58, 58)),
-        sea: rgb((24, 24, 24)),
     },
     // The 16 ANSI colours only, for terminals without true colour (the
     // terminal's own palette decides what they look like).
@@ -214,7 +206,6 @@ pub const THEMES: &[Theme] = &[
         tx_grad: [(0, 0, 0); 3],
         heat_grad: [(0, 0, 0); 3],
         land: Color::DarkGray,
-        sea: Color::Reset,
     },
 ];
 
