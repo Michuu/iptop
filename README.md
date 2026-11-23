@@ -23,8 +23,11 @@ runs ping and traceroute.
 - **iftop keys**: `n N s d S D p t 1 2 3 < > o b B L T P l f j k q` behave as you expect.
   One line per host pair is the default, so you don't need to press `t` every time.
 - **btop-style display**: a mirrored braille RX/TX graph, gradient sparklines per host,
-  bars that show the RX/TX split, an adjustable update rate (`+`/`-`) and adjustable averaging
-  windows (`w`).
+  bars that show the RX/TX split, and one time-scale knob (`+`/`-`) that sets the update rate,
+  the averaging windows and the graph's span together.
+- **A table you can read while it moves**: rows hold still while you scroll or click; the cursor
+  stays on its row number (top mode) or follows a host wherever it ranks (`space`). Sort by any
+  column (click its header), or by sent, received, total, flows, IP, ASN or country (`O`).
 - **GeoIP + ASN** from MaxMind `.mmdb` files (GeoLite2 City/ASN, or ones patched with your own networks).
 - **Host panel** (Enter or click): live ping with a loss graph, a traceroute where every hop
   gets geo and ASN, the host's traffic graph, and its individual flows.
@@ -105,7 +108,7 @@ sudo iptop -i any -x                # every interface, external peers only
 sudo iptop -x -I 10.0.0.0/8 -I 198.51.100.7   # hide traffic between your own networks/hosts
 sudo iptop -f 'tcp and not (port 22 or port 443)'
 sudo iptop -P --lines two           # ports + classic iftop two-line view
-sudo iptop -u 500 -w 1,5,20         # update twice a second, 1/5/20 s averages
+sudo iptop --scale slow -o total    # update every 5 s, sort by total bytes
 ```
 
 | option | |
@@ -119,10 +122,10 @@ sudo iptop -u 500 -w 1,5,20         # update twice a second, 1/5/20 s averages
 | `-f EXPR` | flow filter (see below) |
 | `-x` | external only |
 | `-I CIDR` | extra networks/hosts to treat as internal (repeatable) |
-| `-o 2s\|10s\|40s\|source\|destination` | initial sort |
+| `-o KEY` / `-r` | sort by `1` `2` `3` (rate window), `sent` `recv` `total` `flows` `source` `destination` `ip` `asn` `country` / reversed |
 | `--lines one\|two\|sent\|recv` | line display |
-| `-u MS` | update interval |
-| `-w A,B,C` | averaging windows in seconds |
+| `--scale S` | time scale: `fast` (default) `normal` `slow` `slower`, see below |
+| `-u MS` / `-w A,B,C` | custom update interval / averaging windows (override `--scale`) |
 | `--geoip PATH` | `.mmdb` file or directory |
 | `--geo-format FMT` | geo column: `short` `org` `asn` `place` `full` `off` |
 | `--config PATH` / `--no-config` | use another config file / ignore it |
@@ -148,19 +151,40 @@ filter = not port 22          # the value is the rest of the line
 | iftop classics | | iptop extras | |
 |---|---|---|---|
 | `n` / `N` | DNS / port names | `⏎` / click | **host panel**: geo, ASN, ping, traceroute, flows; `tab`/`l` switches remote ↔ local host |
+| | | `O` / `R` / click header | **sort menu** / reverse / sort by that column (again: reverse) |
+| | | `space` | follow the selected host as it moves / stay on the row number |
 | `s` / `d` | hide local / remote host | `i`, `[` `]` | interface picker / prev / next |
 | `S` `D` `p` | local / remote / all ports | `x` | scope: all → external → internal |
 | `t` | two-line / one-line / sent / recv | `e` / `E` | filter out this host / only this host |
-| `1 2 3 < >` | sort by window / src / dst | `G` | geo format, table + traceroute (or off) |
+| `1 2 3 < >` | sort by window / src / dst (again: reverse) | `G` | geo format, table + traceroute (or off) |
 | `o` | freeze order | `g` | traffic graph |
 | `b` / `B` | bars / bar window | `u` | bits ↔ bytes |
 | `L` | log / linear bars | `r` | reset stats |
-| `T` | cumulative totals | `+` / `-` | update interval 100 ms … 10 s |
-| `P` | pause | `w` | windows 1/5/20 · 2/10/40 · 5/30/120 · 10/60/300 s |
-| `l` or `/` | screen search | `j k ↑ ↓ PgUp PgDn` | move selection |
+| `T` | cumulative totals | `+` / `-` | time scale (below) |
+| `P` | pause | `j k ↑ ↓ PgUp PgDn End` | move the cursor; `Home` back to the top |
+| `l` or `/` | screen search | | |
 | `f` | edit filter | `F` | clear filter + search |
 | `q` | quit | `y` / `Y` | copy IP / hostname (OSC 52, wl-copy, xclip) |
 | | | `h` / `?` | help |
+
+### Scrolling, following and the time scale
+
+The cursor normally stays on its row number while hosts move past it, so with the cursor at the
+top you always see the busiest hosts. Scrolling or clicking holds the row order for 5 seconds
+(`held` in the header) so nothing jumps under the pointer; `o` freezes it for good. Press `space`
+to follow the selected host instead: the cursor sticks to it as it climbs or drops (`FOLLOW`).
+The host panel follows its host the same way while it is open.
+
+`+` / `-` change the time scale. The update interval always equals the shortest averaging window,
+so every update shows a complete, fresh average and no traffic falls between updates; the graph
+draws one sample per update, so slower scales show a longer history.
+
+| scale | updates every | averages | graph covers |
+|---|---|---|---|
+| `fast` (default) | 1 s | 1 / 5 / 20 s | up to 15 min |
+| `normal` (iftop's) | 2 s | 2 / 10 / 40 s | up to 30 min |
+| `slow` | 5 s | 5 / 30 / 120 s | up to 1 h |
+| `slower` | 10 s | 10 / 60 / 300 s | up to 1 h |
 
 ### Filter language
 

@@ -116,7 +116,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(a.geo_format, "org");
-        assert_eq!(a.interval, 500);
+        assert_eq!(a.interval, Some(500));
         assert_eq!(a.internal_nets, ["10.0.0.0/8", "1.2.3.4"]);
     }
 }

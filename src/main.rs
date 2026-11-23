@@ -53,16 +53,22 @@ pub struct Args {
     /// Extra networks/hosts to treat as internal (repeatable), e.g. -I 192.168.10.0/24 -I 198.51.100.7
     #[arg(short = 'I', long = "internal-net")]
     pub internal_nets: Vec<String>,
-    /// Sort by: 2s, 10s, 40s, source, destination
-    #[arg(short = 'o', long, default_value = "2s")]
+    /// Sort by: 1, 2, 3 (rate window), sent, recv, total, flows, source, destination, ip, asn, country
+    #[arg(short = 'o', long, default_value = "1")]
     pub order: String,
+    /// Reverse the sort order
+    #[arg(short = 'r', long)]
+    pub reverse: bool,
     /// Line display: one, two, sent, recv
     #[arg(long, default_value = "one")]
     pub lines: String,
-    /// Update interval in milliseconds (keys + / -), like btop
-    #[arg(short = 'u', long, default_value_t = 1000)]
-    pub interval: u64,
-    /// The three averaging windows in seconds (key w cycles presets)
+    /// Time scale: fast (1s, 1/5/20s), normal (2s, 2/10/40s), slow (5s, 5/30/120s), slower (10s, 10/60/300s); keys + / -
+    #[arg(long, value_name = "SCALE")]
+    pub scale: Option<String>,
+    /// Custom update interval in milliseconds (overrides --scale)
+    #[arg(short = 'u', long, value_name = "MS")]
+    pub interval: Option<u64>,
+    /// Custom averaging windows in seconds (overrides --scale)
     #[arg(short = 'w', long, value_name = "A,B,C")]
     pub windows: Option<String>,
     /// GeoIP .mmdb file or directory (default: ~/geoip-*/mmdb, ~/geoip-*, /usr/share/GeoIP, ...)

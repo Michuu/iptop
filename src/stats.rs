@@ -9,7 +9,7 @@ use std::time::Instant;
 /// Seconds of history kept per flow (enough for the longest averaging window).
 pub const FLOW_HIST: usize = 304;
 /// Seconds of history kept for the totals graph.
-pub const TOTAL_HIST: usize = 900;
+pub const TOTAL_HIST: usize = 3600;
 /// A flow is forgotten after this many idle seconds (at least; see expire()).
 pub const FLOW_IDLE: u64 = 60;
 

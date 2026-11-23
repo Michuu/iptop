@@ -1,6 +1,6 @@
 //! Rendering.
 
-use crate::app::{App, InputKind, LineMode, Popup, Row, Sort, SPARK};
+use crate::app::{App, InputKind, LineMode, Popup, Row, Sort, SCALES, SPARK};
 use crate::filter::Scope;
 use crate::geo::GeoFmt;
 use crate::util::{self, fit, fmt_bytes, fmt_dur, fmt_rate, has_ports};
@@ -94,6 +94,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             draw_help(f, area)
         }
         Popup::Ifaces => draw_ifaces(f, area, app),
+        Popup::Sort => draw_sort(f, area, app),
         Popup::None => {}
     }
 }
@@ -133,12 +134,14 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     }
     f.render_widget(Paragraph::new(Line::from(l)), area);
 
-    let sort = match app.sort {
-        Sort::Col(i) => format!("{}s", app.windows[i]),
-        Sort::Src => "source".into(),
-        Sort::Dst => "dest".into(),
-    };
+    let sort = format!("{} {}", app.sort.label(&app.windows), sort_arrow(app));
     let mut r = Vec::new();
+    if app.following() {
+        r.push(Span::styled(" FOLLOW ", Style::new().bg(RX_C).fg(Color::Black).bold()));
+        r.push(Span::raw(" "));
+    } else if app.held() && !app.frozen && app.follow.is_none() {
+        r.push(Span::styled("held ", Style::new().fg(DIM).italic()));
+    }
     if app.paused {
         r.push(Span::styled(" PAUSED ", Style::new().bg(WARN).fg(Color::Black).bold()));
         r.push(Span::raw(" "));
@@ -148,6 +151,9 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
         r.push(Span::raw(" "));
     }
     r.push(Span::styled("⟳ ", Style::new().fg(ACCENT)));
+    if let Some(i) = app.scale_idx {
+        r.push(Span::styled(format!("{} ", SCALES[i].0), Style::new().fg(DIM)));
+    }
     r.push(Span::styled(util::fmt_ms(app.interval.as_millis() as u64), Style::new().fg(FG)));
     r.push(sep());
     r.push(Span::styled(app.line_mode.name(), Style::new().fg(DIM)));
@@ -157,6 +163,15 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     r.push(Span::styled(util::clock(), Style::new().fg(FG)));
     r.push(Span::raw(" "));
     f.render_widget(Paragraph::new(Line::from(r)).alignment(Alignment::Right), area);
+}
+
+/// ▾ biggest / Z first, ▴ smallest / A first.
+fn sort_arrow(app: &App) -> &'static str {
+    if app.sort.descending() != app.sort_rev {
+        "▾"
+    } else {
+        "▴"
+    }
 }
 
 // ------------------------------------------------------------------ graph
@@ -255,7 +270,7 @@ fn graph_labels(buf: &mut Buffer, area: Rect, tmax: f64, bmax: f64, bytes: bool)
 
 fn draw_graph(f: &mut Frame, area: Rect, app: &App) {
     let [g, side] = Layout::horizontal([Constraint::Min(20), Constraint::Length(30)]).areas(area);
-    let secs = (g.width.saturating_sub(2) as usize * 2).min(app.graph_rx.len());
+    let secs = (g.width.saturating_sub(2) as usize * 2).min(app.graph_rx.len()) * app.graph_step as usize;
     let block = panel(Line::from(vec![
         Span::raw(" "),
         Span::styled("traffic", Style::new().fg(FG).bold()),
@@ -408,19 +423,31 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
     let c = columns(inner, app);
     let buf = f.buffer_mut();
 
-    // header line
+    // header line; every column header is clickable to sort by it
     let hs = Style::new().fg(DIM).add_modifier(Modifier::BOLD);
-    let label_hdr = if app.hide_local {
-        "remote".to_string()
+    let on = Style::new().fg(ACCENT).bold().underlined();
+    let arrow = sort_arrow(app);
+    let mut hits = Vec::new();
+    let mut head = |buf: &mut Buffer, x: u16, w: usize, text: &str, s: Sort, right: bool| {
+        let cur = app.sort == s;
+        let t = if cur { format!("{text} {arrow}") } else { text.to_string() };
+        let t = if right { format!("{t:>w$}") } else { t };
+        buf.set_stringn(x, inner.y, &t, w, if cur { on } else { hs });
+        hits.push((x, x + w as u16, s));
+    };
+    if app.hide_local {
+        head(buf, c.label_x, c.label_w, "remote", Sort::Dst, false);
     } else if app.hide_remote {
-        "local".to_string()
+        head(buf, c.label_x, c.label_w, "local", Sort::Src, false);
     } else {
         let half = c.label_w.saturating_sub(3) / 2;
-        format!("{:<half$}   remote", "local")
-    };
-    buf.set_stringn(c.label_x, inner.y, &label_hdr, c.label_w, hs);
+        head(buf, c.label_x, half, "local", Sort::Src, false);
+        head(buf, c.label_x + half as u16 + 3, c.label_w.saturating_sub(half + 3), "remote", Sort::Dst, false);
+    }
     if c.geo_w > 0 {
-        buf.set_stringn(c.geo_x, inner.y, app.geo_fmt.header(), c.geo_w, hs);
+        let gs = if matches!(app.geo_fmt, GeoFmt::Place) { Sort::Country } else { Sort::Asn };
+        let gs = if app.sort == Sort::Country { Sort::Country } else { gs };
+        head(buf, c.geo_x, c.geo_w, app.geo_fmt.header(), gs, false);
     }
     if c.spark_w > 0 {
         buf.set_stringn(c.spark_x, inner.y, format!("last {}s", c.spark_w), c.spark_w, hs);
@@ -432,10 +459,10 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
         "total".to_string(),
     ];
     for (i, h) in hdrs.iter().take(c.ncols).enumerate() {
-        let sorted = matches!(app.sort, Sort::Col(s) if s == i);
-        let st = if sorted { Style::new().fg(ACCENT).bold().underlined() } else { hs };
-        buf.set_string(c.num_x + (i * c.num_w) as u16, inner.y, format!("{h:>w$}", w = c.num_w), st);
+        let s = if i == 3 { Sort::Total } else { Sort::Col(i) };
+        head(buf, c.num_x + (i * c.num_w) as u16, c.num_w, h, s, true);
     }
+    app.header_hits = (inner.y, hits);
 
     // rows
     let lines_per = if app.line_mode == LineMode::Two { 2 } else { 1 };
@@ -587,6 +614,8 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         &[
             ("h", "help"),
             ("⏎", "host"),
+            ("O", "sort"),
+            ("␣", "follow"),
             ("i", "iface"),
             ("x", "scope"),
             ("f", "filter"),
@@ -632,7 +661,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
                 ("s / d", "hide local (source) / remote (dest) host"),
                 ("S / D / p", "toggle local / remote / all ports"),
                 ("t", "cycle line display: two-line, one-line, sent, recv"),
-                ("1 2 3 < >", "sort by window 1 / 2 / 3 / source / dest"),
+                ("1 2 3 < >", "sort by window 1 / 2 / 3 / source / dest (again: reverse)"),
                 ("o", "freeze current order"),
                 ("b / B", "toggle bars / cycle which window the bars show"),
                 ("L", "log / linear bar scale"),
@@ -640,7 +669,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
                 ("P", "pause display"),
                 ("l  or  /", "screen search (host, port, geo)"),
                 ("f", "edit flow filter"),
-                ("j k ↑ ↓", "move selection   PgUp/PgDn/Home/End"),
+                ("j k ↑ ↓", "move cursor (rows hold still)  PgUp/PgDn/End; Home: top"),
                 ("q", "quit"),
             ],
         ),
@@ -649,6 +678,9 @@ fn draw_help(f: &mut Frame, area: Rect) {
             &[
                 ("⏎ / click", "host panel: geo, ASN, ping, traceroute, flows"),
                 ("tab / l", "host panel: probe the remote ↔ local host"),
+                ("O / R", "sort menu (up, down, total, flows, ip, asn, …) / reverse"),
+                ("click header", "sort by that column; again to reverse"),
+                ("space", "follow the selected host as it moves (or stay in place)"),
                 ("i  [  ]", "interface picker / previous / next interface"),
                 ("x", "scope: all → external only → internal only"),
                 ("e / E", "filter out this host / show only this host"),
@@ -656,8 +688,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
                 ("y / Y", "copy IP / hostname to the clipboard"),
                 ("G", "geo (table + traceroute): AS+org → org → AS → city → city+AS → off"),
                 ("g", "toggle traffic graph"),
-                ("+ / -", "update interval 100ms … 10s (like btop)"),
-                ("w", "averaging windows 1/5/20 · 2/10/40 · 5/30/120 · 10/60/300 s"),
+                ("+ / -", "time scale: update 1/2/5/10 s, averages 1/5/20 … 10/60/300 s"),
                 ("u", "bits ↔ bytes"),
                 ("r", "reset statistics"),
             ],
@@ -713,7 +744,7 @@ fn draw_ifaces(f: &mut Frame, area: Rect, app: &mut App) {
         .title_bottom(Line::from(format!("{pos} ⏎/click switch · esc close ")).right_aligned());
     let inner = block.inner(r);
     f.render_widget(block, r);
-    app.iface_hits.clear();
+    app.popup_hits.clear();
     let buf = f.buffer_mut();
     let hs = Style::new().fg(DIM).bold();
     buf.set_string(inner.x + 2, inner.y, format!("{:<16} {:<8} {:>9} {:>9}  addresses", "name", "state", "↓ rx", "↑ tx"), hs);
@@ -722,7 +753,7 @@ fn draw_ifaces(f: &mut Frame, area: Rect, app: &mut App) {
         if y >= inner.y + inner.height {
             break;
         }
-        app.iface_hits.push((y, i));
+        app.popup_hits.push((y, i));
         let sel = i == app.iface_sel;
         if sel {
             buf.set_style(Rect::new(inner.x, y, inner.width, 1), Style::new().bg(SEL_BG));
@@ -742,6 +773,41 @@ fn draw_ifaces(f: &mut Frame, area: Rect, app: &mut App) {
         buf.set_string(inner.x + 38, y, format!("{:>9}", fmt_rate(e.tx, app.bytes)), Style::new().fg(TX_C));
         let aw = inner.width.saturating_sub(50) as usize;
         buf.set_stringn(inner.x + 50, y, addrs.join(" "), aw, Style::new().fg(DIM));
+    }
+}
+
+fn draw_sort(f: &mut Frame, area: Rect, app: &mut App) {
+    let n = Sort::MENU.len() as u16;
+    let r = centered(area, 40, n + 2);
+    app.popup_area = Some((r.x, r.y, r.width, r.height));
+    f.render_widget(Clear, r);
+    let block = panel(title("sort by")).title_bottom(Line::from(" ⏎/click pick · R reverse ").right_aligned());
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    app.popup_hits.clear();
+    let arrow = sort_arrow(app);
+    let buf = f.buffer_mut();
+    for (i, s) in Sort::MENU.iter().enumerate() {
+        let y = inner.y + i as u16;
+        if y >= inner.y + inner.height {
+            break;
+        }
+        app.popup_hits.push((y, i));
+        if i == app.sort_sel {
+            buf.set_style(Rect::new(inner.x, y, inner.width, 1), Style::new().bg(SEL_BG));
+            buf.set_string(inner.x, y, "▌", Style::new().fg(ACCENT));
+        }
+        let cur = *s == app.sort;
+        let st = if cur { Style::new().fg(ACCENT).bold() } else { Style::new().fg(FG) };
+        let key = match s {
+            Sort::Col(k) => format!("{}", k + 1),
+            Sort::Src => "<".into(),
+            Sort::Dst => ">".into(),
+            _ => String::new(),
+        };
+        buf.set_string(inner.x + 2, y, format!("{key:>1}"), Style::new().fg(WARN));
+        let mark = if cur { format!(" {arrow}") } else { String::new() };
+        buf.set_stringn(inner.x + 5, y, format!("{}{mark}", s.label(&app.windows)), inner.width.saturating_sub(6) as usize, st);
     }
 }
 

@@ -18,10 +18,18 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const SPARK: usize = 32;
-/// Averaging-window presets (seconds), cycled with `w`. iftop uses 2/10/40.
-pub const WINDOW_PRESETS: [[u64; 3]; 4] = [[1, 5, 20], [2, 10, 40], [5, 30, 120], [10, 60, 300]];
-/// Refresh-interval steps (ms), changed with `+` / `-` like btop.
-pub const REFRESH_STEPS: [u64; 8] = [100, 250, 500, 1000, 2000, 3000, 5000, 10000];
+/// Time scales (`+` / `-`): name, update interval (ms) and the three averaging
+/// windows (s). The update interval equals the shortest window, so every
+/// update shows a fresh, complete average and no traffic is skipped; the graph
+/// draws one sample per update, so slower scales also cover a longer time.
+pub const SCALES: [(&str, u64, [u64; 3]); 4] = [
+    ("fast", 1000, [1, 5, 20]),
+    ("normal", 2000, [2, 10, 40]),
+    ("slow", 5000, [5, 30, 120]),
+    ("slower", 10000, [10, 60, 300]),
+];
+/// Rows keep their order this long after the last navigation input.
+const HOLD: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum LineMode {
@@ -42,11 +50,94 @@ impl LineMode {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Sort {
+    /// Rate over averaging window 0/1/2 (sent + received, or one direction in sent/recv line mode).
     Col(usize),
+    /// Sent (upload) rate over the shortest window.
+    Sent,
+    /// Received (download) rate over the shortest window.
+    Recv,
+    /// Cumulative bytes.
+    Total,
+    Flows,
+    /// Local host name.
     Src,
+    /// Remote host name.
     Dst,
+    /// Remote IP address, numerically.
+    Ip,
+    Asn,
+    Country,
+}
+
+impl Sort {
+    pub const MENU: [Sort; 12] = [
+        Sort::Col(0),
+        Sort::Col(1),
+        Sort::Col(2),
+        Sort::Sent,
+        Sort::Recv,
+        Sort::Total,
+        Sort::Flows,
+        Sort::Src,
+        Sort::Dst,
+        Sort::Ip,
+        Sort::Asn,
+        Sort::Country,
+    ];
+
+    pub fn parse(s: &str) -> Option<Sort> {
+        Some(match s {
+            "1" | "w1" | "2s" => Sort::Col(0),
+            "2" | "w2" | "10s" => Sort::Col(1),
+            "3" | "w3" | "40s" => Sort::Col(2),
+            "sent" | "up" | "tx" => Sort::Sent,
+            "recv" | "down" | "rx" => Sort::Recv,
+            "total" => Sort::Total,
+            "flows" => Sort::Flows,
+            "source" | "src" | "local" => Sort::Src,
+            "destination" | "dst" | "remote" | "name" => Sort::Dst,
+            "ip" => Sort::Ip,
+            "asn" => Sort::Asn,
+            "country" | "cc" | "geo" => Sort::Country,
+            _ => return None,
+        })
+    }
+
+    /// Biggest first (rates, bytes) rather than A→Z.
+    pub fn descending(self) -> bool {
+        matches!(self, Sort::Col(_) | Sort::Sent | Sort::Recv | Sort::Total | Sort::Flows)
+    }
+
+    pub fn label(self, windows: &[u64; 3]) -> String {
+        match self {
+            Sort::Col(i) => format!("{}s rate", windows[i]),
+            Sort::Sent => format!("↑ sent ({}s)", windows[0]),
+            Sort::Recv => format!("↓ received ({}s)", windows[0]),
+            Sort::Total => "total bytes".into(),
+            Sort::Flows => "flows".into(),
+            Sort::Src => "local name".into(),
+            Sort::Dst => "remote name".into(),
+            Sort::Ip => "remote IP".into(),
+            Sort::Asn => "ASN".into(),
+            Sort::Country => "country".into(),
+        }
+    }
+}
+
+/// `None` sorts last whatever the direction.
+fn none_last<T: Ord>(a: &Option<T>, b: &Option<T>, rev: bool) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    match (a, b) {
+        (Some(x), Some(y)) => {
+            let o = x.cmp(y);
+            if rev { o.reverse() } else { o }
+        }
+        (Some(_), None) => Less,
+        (None, Some(_)) => Greater,
+        (None, None) => Equal,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -60,6 +151,7 @@ pub enum Popup {
     None,
     Help,
     Ifaces,
+    Sort,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -76,6 +168,8 @@ pub struct Row {
     pub local: String,
     pub remote: String,
     pub geo: String,
+    pub asn: Option<u32>,
+    pub cc: Option<String>,
     pub sent: [f64; 3],
     pub recv: [f64; 3],
     pub tot_sent: u64,
@@ -91,6 +185,8 @@ impl Row {
             local: String::new(),
             remote: String::new(),
             geo: String::new(),
+            asn: None,
+            cc: None,
             sent: [0.0; 3],
             recv: [0.0; 3],
             tot_sent: 0,
@@ -145,6 +241,22 @@ pub struct App {
     pub paused: bool,
     pub frozen: bool,
     pub sort: Sort,
+    /// Reverse the sort's natural direction.
+    pub sort_rev: bool,
+    /// Follow mode: the cursor sticks to this row (Space); otherwise it stays
+    /// on its row number and the table shows whoever ranks there.
+    pub follow: Option<RowKey>,
+    /// `follow` was set by opening the host panel, not by Space.
+    follow_auto: bool,
+    /// Keep the row order until then (set by scrolling / clicking).
+    pub hold_until: Option<Instant>,
+    /// An input changed something that needs a recompute (not just navigation).
+    dirty: bool,
+    /// Index into SCALES, None for a custom -u / -w combination.
+    pub scale_idx: Option<usize>,
+    /// Seconds per graph sample (one sample per update).
+    pub graph_step: u64,
+    pub sort_sel: usize,
     pub line_mode: LineMode,
     pub show_totals: bool,
     pub log_scale: bool,
@@ -170,7 +282,6 @@ pub struct App {
     pub rows: Vec<Row>,
     order: Vec<RowKey>,
     pub selected: usize,
-    selected_key: Option<RowKey>,
     pub offset: usize,
     pub scale: f64,
     pub graph_rx: Vec<f64>,
@@ -187,7 +298,9 @@ pub struct App {
     /// First visible row of the interface picker (kept in view by the UI).
     pub iface_off: usize,
     /// screen row y -> interface index, and the popup's area (for mouse)
-    pub iface_hits: Vec<(u16, usize)>,
+    pub popup_hits: Vec<(u16, usize)>,
+    /// Table header: its row and the clickable column spans (x0, x1, sort).
+    pub header_hits: (u16, Vec<(u16, u16, Sort)>),
     pub popup_area: Option<(u16, u16, u16, u16)>,
     ifstat_prev: (HashMap<String, (u64, u64)>, Instant),
     /// screen row y -> row index (for mouse), filled by the UI
@@ -226,13 +339,9 @@ impl App {
         let filter = Filter { geo: geo.available().then(|| geo.clone()), ..filter };
         let stats: SharedStats = Arc::new(Mutex::new(Stats::new(filter)));
 
-        let sort = match args.order.as_str() {
-            "10s" => Sort::Col(1),
-            "40s" => Sort::Col(2),
-            "source" | "src" => Sort::Src,
-            "destination" | "dst" => Sort::Dst,
-            _ => Sort::Col(0),
-        };
+        let sort = Sort::parse(&args.order).ok_or_else(|| {
+            anyhow::anyhow!("--order: expected 1, 2, 3, sent, recv, total, flows, source, destination, ip, asn or country")
+        })?;
         let line_mode = match args.lines.as_str() {
             "two" => LineMode::Two,
             "sent" => LineMode::Sent,
@@ -240,6 +349,13 @@ impl App {
             _ => LineMode::One,
         };
 
+        let base = match &args.scale {
+            Some(name) => SCALES
+                .iter()
+                .position(|s| s.0 == name.as_str())
+                .ok_or_else(|| anyhow::anyhow!("--scale: expected fast, normal, slow or slower"))?,
+            None => 0,
+        };
         let windows = match &args.windows {
             Some(w) => {
                 let v: Vec<u64> = w.split(',').filter_map(|x| x.trim().parse().ok()).collect();
@@ -248,9 +364,11 @@ impl App {
                 }
                 [v[0], v[1], v[2]]
             }
-            None => [2, 10, 40],
+            None => SCALES[base].2,
         };
-        let interval = Duration::from_millis(args.interval.clamp(50, 60_000));
+        let interval_ms = args.interval.unwrap_or(SCALES[base].1).clamp(50, 60_000);
+        let interval = Duration::from_millis(interval_ms);
+        let scale_idx = SCALES.iter().position(|s| s.1 == interval_ms && s.2 == windows);
 
         let mut app = App {
             stats,
@@ -274,6 +392,14 @@ impl App {
             paused: false,
             frozen: false,
             sort,
+            sort_rev: args.reverse,
+            follow: None,
+            follow_auto: false,
+            hold_until: None,
+            dirty: false,
+            scale_idx,
+            graph_step: (interval_ms / 1000).max(1),
+            sort_sel: 0,
             line_mode,
             show_totals: true,
             log_scale: true,
@@ -291,7 +417,6 @@ impl App {
             rows: Vec::new(),
             order: Vec::new(),
             selected: 0,
-            selected_key: None,
             offset: 0,
             scale: 125.0,
             graph_rx: Vec::new(),
@@ -306,7 +431,8 @@ impl App {
             ifaces: Vec::new(),
             iface_sel: 0,
             iface_off: 0,
-            iface_hits: Vec::new(),
+            popup_hits: Vec::new(),
+            header_hits: (0, Vec::new()),
             popup_area: None,
             ifstat_prev: (HashMap::new(), Instant::now()),
             row_hits: Vec::new(),
@@ -373,7 +499,11 @@ impl App {
                     }
                 }
                 // Apply toggles immediately instead of waiting a full interval.
-                self.tick();
+                // Plain navigation only redraws: the table must not reshuffle
+                // under the cursor while scrolling.
+                if std::mem::take(&mut self.dirty) {
+                    self.tick();
+                }
                 if self.interval != old_interval {
                     next = Instant::now() + self.interval;
                 }
@@ -389,6 +519,35 @@ impl App {
             LineMode::Recv => r.recv[i],
             _ => r.sent[i] + r.recv[i],
         }
+    }
+
+    fn cmp_rows(&self, a: &Row, b: &Row) -> std::cmp::Ordering {
+        let rev = self.sort_rev;
+        let o = match self.sort {
+            Sort::Col(i) => self.sort_val(b, i).total_cmp(&self.sort_val(a, i)),
+            Sort::Sent => b.sent[0].total_cmp(&a.sent[0]),
+            Sort::Recv => b.recv[0].total_cmp(&a.recv[0]),
+            Sort::Total => (b.tot_sent + b.tot_recv).cmp(&(a.tot_sent + a.tot_recv)),
+            Sort::Flows => b.nflows.cmp(&a.nflows),
+            Sort::Src => a.local.cmp(&b.local),
+            Sort::Dst => a.remote.cmp(&b.remote),
+            Sort::Ip => a.key.remote.or(a.key.local).cmp(&b.key.remote.or(b.key.local)),
+            // Missing geo data stays at the bottom in either direction.
+            Sort::Asn => return none_last(&a.asn, &b.asn, rev),
+            Sort::Country => {
+                return none_last(&a.cc, &b.cc, rev).then_with(|| none_last(&a.asn, &b.asn, false));
+            }
+        };
+        if rev { o.reverse() } else { o }
+    }
+
+    /// Pinned with Space (not the host panel's implicit follow).
+    pub fn following(&self) -> bool {
+        self.follow.is_some() && !self.follow_auto
+    }
+
+    pub fn held(&self) -> bool {
+        self.hold_until.is_some_and(|t| Instant::now() < t)
     }
 
     pub fn bar_val(&self, r: &Row) -> f64 {
@@ -467,9 +626,13 @@ impl App {
             self.rates[i] = st.filtered.avg(now, *n);
         }
         self.totals = (st.filtered.total_sent, st.filtered.total_recv);
-        let (tx, rx) = st.filtered.series(now, TOTAL_HIST);
-        self.graph_tx = tx;
-        self.graph_rx = rx;
+        // One graph sample per update: the average of its `step` seconds.
+        let step = self.graph_step as usize;
+        let n = (TOTAL_HIST / step).min(900);
+        let (tx, rx) = st.filtered.series(now, n * step);
+        let per = |v: Vec<f64>| v.chunks(step).map(|c| c.iter().sum::<f64>() / step as f64).collect();
+        self.graph_tx = per(tx);
+        self.graph_rx = per(rx);
 
         // ----- rows
         let show_ports = self.show_lport || self.show_rport;
@@ -545,13 +708,12 @@ impl App {
         for r in rows.iter_mut() {
             r.local = self.endpoint(r.key.local, r.key.lport, r.key.proto);
             r.remote = self.endpoint(r.key.remote, r.key.rport, r.key.proto);
-            if self.geo_fmt != GeoFmt::Off {
-                // Geo of the peer (or of the local side if peers are aggregated).
-                if let Some(ip) = r.key.remote.or(r.key.local) {
-                    if let Some(g) = self.geo.lookup(&ip) {
-                        r.geo = self.geo_fmt.render(&g);
-                    }
-                }
+            // Geo of the peer (or of the local side if peers are aggregated);
+            // looked up even when the column is off, for sorting by ASN / country.
+            if let Some(g) = r.key.remote.or(r.key.local).and_then(|ip| self.geo.lookup(&ip)) {
+                r.geo = self.geo_fmt.render(&g);
+                r.asn = g.asn;
+                r.cc = g.cc;
             }
         }
         if !self.search.is_empty() {
@@ -562,17 +724,14 @@ impl App {
                     || r.geo.to_lowercase().contains(&q)
             });
         }
-        match self.sort {
-            Sort::Col(i) => rows.sort_by(|a, b| {
-                self.sort_val(b, i)
-                    .total_cmp(&self.sort_val(a, i))
-                    .then_with(|| a.remote.cmp(&b.remote))
-                    .then_with(|| a.local.cmp(&b.local))
-            }),
-            Sort::Src => rows.sort_by(|a, b| a.local.cmp(&b.local).then_with(|| a.remote.cmp(&b.remote))),
-            Sort::Dst => rows.sort_by(|a, b| a.remote.cmp(&b.remote).then_with(|| a.local.cmp(&b.local))),
-        }
-        if self.frozen {
+        rows.sort_by(|a, b| {
+            self.cmp_rows(a, b)
+                .then_with(|| a.remote.cmp(&b.remote))
+                .then_with(|| a.local.cmp(&b.local))
+        });
+        // Frozen (o), or held while the user scrolls / clicks: keep the
+        // previous order; new rows go to the bottom.
+        if self.frozen || self.held() {
             let pos: HashMap<&RowKey, usize> = self.order.iter().enumerate().map(|(i, k)| (k, i)).collect();
             rows.sort_by_key(|r| pos.get(&r.key).copied().unwrap_or(usize::MAX));
         }
@@ -581,14 +740,23 @@ impl App {
         let cur_max = rows.iter().map(|r| self.bar_val(r)).fold(0.0, f64::max);
         self.scale = (self.scale * 0.98).max(cur_max).max(125.0);
 
-        if let Some(sel) = &self.selected_key {
-            if let Some(i) = rows.iter().position(|r| &r.key == sel) {
-                self.selected = i;
+        // Follow mode: the cursor goes where the row went. Otherwise it stays
+        // on its row number.
+        if let Some(f) = &self.follow {
+            match rows.iter().position(|r| &r.key == f) {
+                Some(i) => self.selected = i,
+                None if !rows.is_empty() => {
+                    if !self.follow_auto {
+                        self.flash("followed host is gone; cursor stays in place");
+                    }
+                    self.follow = None;
+                    self.follow_auto = false;
+                }
+                None => {}
             }
         }
         self.selected = self.selected.min(rows.len().saturating_sub(1));
         self.rows = rows;
-        self.selected_key = self.rows.get(self.selected).map(|r| r.key.clone());
     }
 
     fn refresh_ifaces(&mut self) {
@@ -674,6 +842,12 @@ impl App {
             (_, _, Some(rm)) => (rm, false),
             (_, None, None) => return,
         };
+        // While the panel is open the cursor follows its row, so j/k move
+        // from where that host is now.
+        if self.follow.is_none() || self.follow_auto {
+            self.follow = Some(r.key.clone());
+            self.follow_auto = true;
+        }
         // Same target (e.g. j/k between rows sharing the local host): keep the running probes.
         if let Some(h) = self.host.as_mut().filter(|h| h.ip == ip) {
             h.local = local;
@@ -695,6 +869,10 @@ impl App {
     fn close_host(&mut self) {
         self.host = None;
         self.host_local = false;
+        if self.follow_auto {
+            self.follow = None;
+            self.follow_auto = false;
+        }
     }
 
     /// Host panel: switch between the selected row's remote and local host.
@@ -764,12 +942,81 @@ impl App {
         }
         let n = self.rows.len() as i64;
         self.selected = (self.selected as i64 + d).clamp(0, n - 1) as usize;
-        self.selected_key = self.rows.get(self.selected).map(|r| r.key.clone());
+        if self.follow.is_some() {
+            // Following: the pin moves with the cursor.
+            self.follow = self.rows.get(self.selected).map(|r| r.key.clone());
+        }
+    }
+
+    /// Navigation in the table: move without recomputing, and hold the row
+    /// order for a moment so rows don't jump while scrolling.
+    fn nav(&mut self, d: i64) {
+        self.move_sel(d);
+        self.hold();
+    }
+
+    fn hold(&mut self) {
+        self.hold_until = Some(Instant::now() + HOLD);
+        self.dirty = false;
+    }
+
+    /// Back to the top: cursor on the first row, live order, no follow.
+    fn go_top(&mut self) {
+        self.selected = 0;
+        self.offset = 0;
+        self.hold_until = None;
+        self.follow = None;
+        self.follow_auto = false;
+    }
+
+    /// Space: pin the cursor to the selected host, or unpin it.
+    fn toggle_follow(&mut self) {
+        if self.follow.is_some() && !self.follow_auto {
+            self.follow = None;
+            self.flash("cursor stays in place (top mode)");
+            return;
+        }
+        let Some(r) = self.rows.get(self.selected) else { return };
+        let label = if r.key.remote.is_some() { r.remote.clone() } else { r.local.clone() };
+        self.follow = Some(r.key.clone());
+        self.follow_auto = false;
+        self.flash(format!("following {label}   (space: stop)"));
+    }
+
+    fn set_sort(&mut self, s: Sort) {
+        if self.sort == s {
+            self.sort_rev = !self.sort_rev;
+        } else {
+            self.sort = s;
+            self.sort_rev = false;
+        }
+        // A new sort should be seen right away, from the top.
+        self.hold_until = None;
+        if self.follow.is_none() {
+            self.offset = 0;
+            self.selected = 0;
+        }
+        let dir = if self.sort.descending() != self.sort_rev { "▾" } else { "▴" };
+        self.flash(format!("sort by {} {dir}", self.sort.label(&self.windows)));
+    }
+
+    fn step_scale(&mut self, dir: i64) {
+        let cur = self.scale_idx.unwrap_or_else(|| {
+            SCALES.iter().position(|s| s.2[0] >= self.windows[0]).unwrap_or(SCALES.len() - 1)
+        });
+        let i = (cur as i64 + dir).clamp(0, SCALES.len() as i64 - 1) as usize;
+        let (name, ms, w) = SCALES[i];
+        self.scale_idx = Some(i);
+        self.interval = Duration::from_millis(ms);
+        self.windows = w;
+        self.graph_step = (ms / 1000).max(1);
+        self.flash(format!("time scale {name}: update {}, averages {}/{}/{}s", util::fmt_ms(ms), w[0], w[1], w[2]));
     }
 
     // --------------------------------------------------------------- input
 
     fn on_mouse(&mut self, m: MouseEvent) {
+        self.dirty = true;
         if self.popup != Popup::None && self.host.is_none() {
             self.on_popup_mouse(m);
             return;
@@ -782,19 +1029,25 @@ impl App {
             return;
         }
         match m.kind {
-            MouseEventKind::ScrollDown => self.move_sel(3),
-            MouseEventKind::ScrollUp => self.move_sel(-3),
+            MouseEventKind::ScrollDown => self.nav(3),
+            MouseEventKind::ScrollUp => self.nav(-3),
+            MouseEventKind::Down(MouseButton::Left) if m.row == self.header_hits.0 => {
+                let hit = self.header_hits.1.iter().find(|(x0, x1, _)| m.column >= *x0 && m.column < *x1);
+                if let Some(&(_, _, s)) = hit {
+                    self.set_sort(s);
+                }
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(&(_, idx)) = self.row_hits.iter().find(|(y, _)| *y == m.row) {
                     let again = matches!(self.last_click, Some((i, t)) if i == idx && t.elapsed() < Duration::from_millis(600));
                     let was_selected = self.selected == idx;
-                    self.selected = idx;
-                    self.selected_key = self.rows.get(idx).map(|r| r.key.clone());
+                    self.move_sel(idx as i64 - self.selected as i64);
                     if again || was_selected {
                         self.open_host();
                         self.last_click = None;
                     } else {
                         self.last_click = Some((idx, Instant::now()));
+                        self.hold();
                     }
                 }
             }
@@ -812,7 +1065,7 @@ impl App {
                 self.popup = Popup::None
             }
             MouseEventKind::Down(MouseButton::Left) if self.popup == Popup::Ifaces => {
-                if let Some(&(_, idx)) = self.iface_hits.iter().find(|(y, _)| *y == m.row) {
+                if let Some(&(_, idx)) = self.popup_hits.iter().find(|(y, _)| *y == m.row) {
                     if self.iface_sel == idx {
                         self.pick_iface();
                     } else {
@@ -822,6 +1075,14 @@ impl App {
             }
             MouseEventKind::ScrollDown if self.popup == Popup::Ifaces => self.move_iface_sel(1),
             MouseEventKind::ScrollUp if self.popup == Popup::Ifaces => self.move_iface_sel(-1),
+            MouseEventKind::Down(MouseButton::Left) if self.popup == Popup::Sort => {
+                if let Some(&(_, idx)) = self.popup_hits.iter().find(|(y, _)| *y == m.row) {
+                    self.sort_sel = idx;
+                    self.pick_sort();
+                }
+            }
+            MouseEventKind::ScrollDown if self.popup == Popup::Sort => self.move_sort_sel(1),
+            MouseEventKind::ScrollUp if self.popup == Popup::Sort => self.move_sort_sel(-1),
             _ => {}
         }
     }
@@ -829,6 +1090,15 @@ impl App {
     fn move_iface_sel(&mut self, d: i64) {
         let n = self.ifaces.len() as i64;
         self.iface_sel = (self.iface_sel as i64 + d).clamp(0, (n - 1).max(0)) as usize;
+    }
+
+    fn move_sort_sel(&mut self, d: i64) {
+        self.sort_sel = (self.sort_sel as i64 + d).clamp(0, Sort::MENU.len() as i64 - 1) as usize;
+    }
+
+    fn pick_sort(&mut self) {
+        self.popup = Popup::None;
+        self.set_sort(Sort::MENU[self.sort_sel]);
     }
 
     fn pick_iface(&mut self) {
@@ -841,6 +1111,7 @@ impl App {
 
     /// Returns true to quit.
     pub fn on_key(&mut self, k: KeyEvent) -> bool {
+        self.dirty = true;
         if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
             return true;
         }
@@ -928,6 +1199,22 @@ impl App {
                 }
                 return false;
             }
+            Popup::Sort => {
+                match k.code {
+                    KeyCode::Esc | KeyCode::Char('O') | KeyCode::Char('q') => self.popup = Popup::None,
+                    KeyCode::Down | KeyCode::Char('j') => self.move_sort_sel(1),
+                    KeyCode::Up | KeyCode::Char('k') => self.move_sort_sel(-1),
+                    KeyCode::Home | KeyCode::Char('g') => self.sort_sel = 0,
+                    KeyCode::End | KeyCode::Char('G') => self.sort_sel = Sort::MENU.len() - 1,
+                    KeyCode::Enter | KeyCode::Char(' ') => self.pick_sort(),
+                    KeyCode::Char('R') => {
+                        self.popup = Popup::None;
+                        self.set_sort(self.sort);
+                    }
+                    _ => {}
+                }
+                return false;
+            }
             Popup::None => {}
         }
 
@@ -985,11 +1272,17 @@ impl App {
                 self.frozen = !self.frozen;
                 self.flash(if self.frozen { "order frozen" } else { "order unfrozen" });
             }
-            KeyCode::Char('1') => self.set_sort(Sort::Col(0), "sort by 2s"),
-            KeyCode::Char('2') => self.set_sort(Sort::Col(1), "sort by 10s"),
-            KeyCode::Char('3') => self.set_sort(Sort::Col(2), "sort by 40s"),
-            KeyCode::Char('<') => self.set_sort(Sort::Src, "sort by source"),
-            KeyCode::Char('>') => self.set_sort(Sort::Dst, "sort by dest"),
+            KeyCode::Char('1') => self.set_sort(Sort::Col(0)),
+            KeyCode::Char('2') => self.set_sort(Sort::Col(1)),
+            KeyCode::Char('3') => self.set_sort(Sort::Col(2)),
+            KeyCode::Char('<') => self.set_sort(Sort::Src),
+            KeyCode::Char('>') => self.set_sort(Sort::Dst),
+            KeyCode::Char('R') => self.set_sort(self.sort),
+            KeyCode::Char('O') => {
+                self.popup = Popup::Sort;
+                self.sort_sel = Sort::MENU.iter().position(|s| *s == self.sort).unwrap_or(0);
+            }
+            KeyCode::Char(' ') => self.toggle_follow(),
             KeyCode::Char('t') => {
                 self.line_mode = match self.line_mode {
                     LineMode::Two => LineMode::One,
@@ -1040,14 +1333,8 @@ impl App {
             KeyCode::Char('[') => self.cycle_iface(-1),
             KeyCode::Char(']') => self.cycle_iface(1),
             KeyCode::Char('g') => self.show_graph = !self.show_graph,
-            KeyCode::Char('+') | KeyCode::Char('=') => self.step_interval(1),
-            KeyCode::Char('-') | KeyCode::Char('_') => self.step_interval(-1),
-            KeyCode::Char('w') => {
-                let cur = WINDOW_PRESETS.iter().position(|p| *p == self.windows);
-                self.windows = WINDOW_PRESETS[cur.map_or(1, |i| (i + 1) % WINDOW_PRESETS.len())];
-                let [a, b, c] = self.windows;
-                self.flash(format!("averaging windows {a}s / {b}s / {c}s"));
-            }
+            KeyCode::Char('+') | KeyCode::Char('=') => self.step_scale(1),
+            KeyCode::Char('-') | KeyCode::Char('_') => self.step_scale(-1),
             KeyCode::Char('G') => self.cycle_geo(),
             KeyCode::Char('e') => self.quick_filter(false),
             KeyCode::Char('E') => self.quick_filter(true),
@@ -1062,12 +1349,12 @@ impl App {
                 self.reset_view();
                 self.flash("statistics reset");
             }
-            KeyCode::Down | KeyCode::Char('j') => self.move_sel(1),
-            KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1),
-            KeyCode::PageDown => self.move_sel(20),
-            KeyCode::PageUp => self.move_sel(-20),
-            KeyCode::Home => self.move_sel(-(self.rows.len() as i64)),
-            KeyCode::End => self.move_sel(self.rows.len() as i64),
+            KeyCode::Down | KeyCode::Char('j') => self.nav(1),
+            KeyCode::Up | KeyCode::Char('k') => self.nav(-1),
+            KeyCode::PageDown => self.nav(20),
+            KeyCode::PageUp => self.nav(-20),
+            KeyCode::Home => self.go_top(),
+            KeyCode::End => self.nav(self.rows.len() as i64),
             KeyCode::Enter => self.open_host(),
             _ => {}
         }
@@ -1077,21 +1364,30 @@ impl App {
     pub fn port_name(&self, p: u16, proto: u8) -> String {
         self.services.name(p, proto).map(String::from).unwrap_or_else(|| p.to_string())
     }
+}
 
-    fn step_interval(&mut self, dir: i32) {
-        let steps = &REFRESH_STEPS[..];
-        let cur = self.interval.as_millis() as u64;
-        let ms = if dir > 0 {
-            steps.iter().copied().find(|&s| s > cur).unwrap_or(*steps.last().unwrap())
-        } else {
-            steps.iter().rev().copied().find(|&s| s < cur).unwrap_or(steps[0])
-        };
-        self.interval = Duration::from_millis(ms);
-        self.flash(format!("update every {}", crate::util::fmt_ms(ms)));
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    fn set_sort(&mut self, s: Sort, msg: &str) {
-        self.sort = s;
-        self.flash(msg);
+    #[test]
+    fn sorts() {
+        for s in Sort::MENU {
+            let name = format!("{s:?}");
+            assert!(!s.label(&[1, 5, 20]).is_empty(), "{name}");
+        }
+        assert_eq!(Sort::parse("10s"), Some(Sort::Col(1)));
+        assert_eq!(Sort::parse("down"), Some(Sort::Recv));
+        assert_eq!(Sort::parse("asn"), Some(Sort::Asn));
+        assert_eq!(Sort::parse("bogus"), None);
+        use std::cmp::Ordering::*;
+        assert_eq!(none_last(&Some(1), &Some(2), false), Less);
+        assert_eq!(none_last(&Some(1), &Some(2), true), Greater);
+        assert_eq!(none_last(&Some(1), &None, true), Less);
+        assert_eq!(none_last::<u32>(&None, &Some(1), false), Greater);
+        // every preset updates once per shortest window
+        for (_, ms, w) in SCALES {
+            assert_eq!(ms, w[0] * 1000);
+        }
     }
 }
