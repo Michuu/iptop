@@ -6,6 +6,7 @@ mod geo;
 mod probe;
 mod resolver;
 mod stats;
+mod theme;
 mod ui;
 mod util;
 
@@ -77,6 +78,9 @@ pub struct Args {
     /// Geo column: short, org, asn, place, full, off (key G cycles)
     #[arg(long, value_name = "FMT", default_value = "short")]
     pub geo_format: String,
+    /// Colour theme (key c cycles): tokyo-night, dracula, nord, gruvbox, catppuccin, solarized-light, mono, tty
+    #[arg(long, value_name = "NAME")]
+    pub theme: Option<String>,
     /// Config file with default options (default: ~/.config/iptop/config)
     #[arg(long, value_name = "PATH")]
     pub config: Option<String>,

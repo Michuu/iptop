@@ -29,6 +29,10 @@ runs ping and traceroute.
   stays on its row number (top mode) or follows a host wherever it ranks (`space`). Sort by any
   column (click its header), or by sent, received, total, flows, IP, ASN or country (`O`).
 - **GeoIP + ASN** from MaxMind `.mmdb` files (GeoLite2 City/ASN, or ones patched with your own networks).
+- **World map** (`m`): a pixelated map where every located host glows with its traffic, beside the
+  graph or big. The selected host blinks.
+- **Themes** (`c`, `--theme`): tokyo-night (default), dracula, nord, gruvbox, catppuccin,
+  solarized-light, mono, and tty for terminals with only 16 colours.
 - **Host panel** (Enter or click): live ping with a loss graph, a traceroute where every hop
   gets geo and ASN, the host's traffic graph, and its individual flows.
 - **Filters that are applied to history:** a BPF-ish filter language with GeoIP terms
@@ -128,6 +132,7 @@ sudo iptop --scale slow -o total    # update every 5 s, sort by total bytes
 | `-u MS` / `-w A,B,C` | custom update interval / averaging windows (override `--scale`) |
 | `--geoip PATH` | `.mmdb` file or directory |
 | `--geo-format FMT` | geo column: `short` `org` `asn` `place` `full` `off` |
+| `--theme NAME` | colour theme (see Features) |
 | `--config PATH` / `--no-config` | use another config file / ignore it |
 
 ### Config file
@@ -143,6 +148,7 @@ internal-net = 192.168.10.0/24
 internal-net = 10.0.0.0/8
 internal-net = 198.51.100.7
 geo-format = full
+theme = nord
 filter = not port 22          # the value is the rest of the line
 ```
 
@@ -161,6 +167,7 @@ filter = not port 22          # the value is the rest of the line
 | `b` / `B` | bars / bar window | `u` | bits ↔ bytes |
 | `L` | log / linear bars | `r` | reset stats |
 | `T` | cumulative totals | `+` / `-` | time scale (below) |
+| | | `m` / `c` | world map (off / beside graph / big) / colour theme |
 | `P` | pause | `j k ↑ ↓ PgUp PgDn End` | move the cursor; `Home` back to the top |
 | `l` or `/` | screen search | | |
 | `f` | edit filter | `F` | clear filter + search |
@@ -240,6 +247,7 @@ release tarballs into `dist/` (it needs `cargo-zigbuild` and `zig`).
 ## Credits
 
 Inspired by [iftop](https://pdw.ex-parrot.com/iftop/) by Paul Warren and Chris Lightfoot, and
-[btop](https://github.com/aristocratos/btop).
+[btop](https://github.com/aristocratos/btop). The world map's land outline is rasterized from
+[Natural Earth](https://www.naturalearthdata.com/) (public domain); host positions need a City database.
 
 License: GPL-2.0-or-later.

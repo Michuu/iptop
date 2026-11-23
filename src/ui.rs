@@ -1,32 +1,23 @@
 //! Rendering.
 
-use crate::app::{App, InputKind, LineMode, Popup, Row, Sort, SCALES, SPARK};
+use crate::app::{App, InputKind, LineMode, MapMode, Popup, Row, Sort, SCALES, SPARK};
 use crate::filter::Scope;
 use crate::geo::GeoFmt;
+use crate::theme::th;
 use crate::util::{self, fit, fmt_bytes, fmt_dur, fmt_rate, has_ports};
 use ratatui::buffer::Buffer;
+use std::collections::HashMap;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use ratatui::Frame;
 
-const ACCENT: Color = Color::Rgb(122, 162, 247);
-const DIM: Color = Color::Rgb(110, 115, 140);
-const FG: Color = Color::Rgb(205, 210, 230);
-const BORDER: Color = Color::Rgb(65, 72, 104);
-const SEL_BG: Color = Color::Rgb(40, 44, 66);
-const RX_C: Color = Color::Rgb(115, 218, 140);
-const TX_C: Color = Color::Rgb(187, 154, 247);
-const RX_BAR: Color = Color::Rgb(26, 72, 52);
-const TX_BAR: Color = Color::Rgb(68, 46, 102);
-const WARN: Color = Color::Rgb(224, 175, 104);
-const ERR: Color = Color::Rgb(247, 118, 142);
-
 #[derive(Clone, Copy)]
 enum Pal {
     Rx,
     Tx,
+    Heat,
 }
 
 fn lerp(a: (u8, u8, u8), b: (u8, u8, u8), t: f64) -> Color {
@@ -37,9 +28,20 @@ fn lerp(a: (u8, u8, u8), b: (u8, u8, u8), t: f64) -> Color {
 /// btop-ish gradient: low -> high.
 fn grad(p: Pal, t: f64) -> Color {
     let t = t.clamp(0.0, 1.0);
-    let (a, b, c) = match p {
-        Pal::Rx => ((80, 200, 120), (230, 200, 70), (240, 90, 90)),
-        Pal::Tx => ((90, 180, 235), (130, 120, 245), (225, 100, 220)),
+    let t_ = th();
+    if t_.is_tty() {
+        return match (p, t < 0.34, t < 0.67) {
+            (Pal::Rx | Pal::Heat, true, _) => Color::Green,
+            (Pal::Tx, true, _) => Color::Blue,
+            (Pal::Tx, false, true) => Color::Magenta,
+            (_, false, true) => Color::Yellow,
+            _ => Color::Red,
+        };
+    }
+    let [a, b, c] = match p {
+        Pal::Rx => t_.rx_grad,
+        Pal::Tx => t_.tx_grad,
+        Pal::Heat => t_.heat_grad,
     };
     if t < 0.5 {
         lerp(a, b, t * 2.0)
@@ -51,22 +53,41 @@ fn grad(p: Pal, t: f64) -> Color {
 fn panel(title: impl Into<Line<'static>>) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(BORDER))
+        .border_style(Style::new().fg(th().border))
         .title(title.into())
 }
 
 fn title(s: &str) -> Line<'static> {
     Line::from(vec![
         Span::raw(" "),
-        Span::styled(s.to_string(), Style::new().fg(FG).bold()),
+        Span::styled(s.to_string(), Style::new().fg(th().fg).bold()),
         Span::raw(" "),
     ])
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    draw_all(f, app);
+    // Themes with their own background: paint every cell still using the
+    // terminal's default colours (including cleared popup areas).
+    if let Some(bg) = th().bg {
+        let fg = th().fg;
+        for c in f.buffer_mut().content.iter_mut() {
+            if c.bg == Color::Reset {
+                c.bg = bg;
+            }
+            if c.fg == Color::Reset {
+                c.fg = fg;
+            }
+        }
+    }
+}
+
+fn draw_all(f: &mut Frame, app: &mut App) {
     let area = f.area();
-    let graph_h = if !app.show_graph {
+    let graph_h = if !app.show_graph && app.map == MapMode::Off {
         0
+    } else if app.map == MapMode::Big {
+        (area.height * 45 / 100).max(10)
     } else if area.height < 26 {
         8
     } else {
@@ -103,64 +124,64 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     let (scope, ftext) = app.filter_desc();
-    let sep = || Span::styled(" │ ", Style::new().fg(BORDER));
+    let sep = || Span::styled(" │ ", Style::new().fg(th().border));
     let mut l = vec![
-        Span::styled(" iptop ", Style::new().bg(ACCENT).fg(Color::Black).bold()),
+        Span::styled(" iptop ", Style::new().bg(th().accent).fg(th().on_accent).bold()),
         Span::raw(" "),
-        Span::styled(format!("⇄ {}", app.iface), Style::new().fg(ACCENT).bold()),
+        Span::styled(format!("⇄ {}", app.iface), Style::new().fg(th().accent).bold()),
     ];
     if app.promisc {
-        l.push(Span::styled(" promisc", Style::new().fg(DIM)));
+        l.push(Span::styled(" promisc", Style::new().fg(th().dim)));
     }
     l.push(sep());
     l.push(match scope {
-        Scope::All => Span::styled(scope.name(), Style::new().fg(DIM)),
-        Scope::External => Span::styled(scope.name(), Style::new().fg(WARN).bold()),
-        Scope::Internal => Span::styled(scope.name(), Style::new().fg(ACCENT).bold()),
+        Scope::All => Span::styled(scope.name(), Style::new().fg(th().dim)),
+        Scope::External => Span::styled(scope.name(), Style::new().fg(th().warn).bold()),
+        Scope::Internal => Span::styled(scope.name(), Style::new().fg(th().accent).bold()),
     });
     if !ftext.is_empty() {
         l.push(sep());
-        l.push(Span::styled("filter ", Style::new().fg(DIM)));
-        l.push(Span::styled(ftext, Style::new().fg(TX_C).bold()));
+        l.push(Span::styled("filter ", Style::new().fg(th().dim)));
+        l.push(Span::styled(ftext, Style::new().fg(th().tx).bold()));
     }
     if !app.search.is_empty() {
         l.push(sep());
-        l.push(Span::styled("search ", Style::new().fg(DIM)));
-        l.push(Span::styled(app.search.clone(), Style::new().fg(RX_C).bold()));
+        l.push(Span::styled("search ", Style::new().fg(th().dim)));
+        l.push(Span::styled(app.search.clone(), Style::new().fg(th().rx).bold()));
     }
     if let Some(e) = &app.capture_error {
         l.push(sep());
-        l.push(Span::styled(e.clone(), Style::new().fg(ERR).bold()));
+        l.push(Span::styled(e.clone(), Style::new().fg(th().err).bold()));
     }
     f.render_widget(Paragraph::new(Line::from(l)), area);
 
     let sort = format!("{} {}", app.sort.label(&app.windows), sort_arrow(app));
     let mut r = Vec::new();
     if app.following() {
-        r.push(Span::styled(" FOLLOW ", Style::new().bg(RX_C).fg(Color::Black).bold()));
+        r.push(Span::styled(" FOLLOW ", Style::new().bg(th().rx).fg(th().on_accent).bold()));
         r.push(Span::raw(" "));
     } else if app.held() && !app.frozen && app.follow.is_none() {
-        r.push(Span::styled("held ", Style::new().fg(DIM).italic()));
+        r.push(Span::styled("held ", Style::new().fg(th().dim).italic()));
     }
     if app.paused {
-        r.push(Span::styled(" PAUSED ", Style::new().bg(WARN).fg(Color::Black).bold()));
+        r.push(Span::styled(" PAUSED ", Style::new().bg(th().warn).fg(th().on_accent).bold()));
         r.push(Span::raw(" "));
     }
     if app.frozen {
-        r.push(Span::styled(" FROZEN ", Style::new().bg(ACCENT).fg(Color::Black).bold()));
+        r.push(Span::styled(" FROZEN ", Style::new().bg(th().accent).fg(th().on_accent).bold()));
         r.push(Span::raw(" "));
     }
-    r.push(Span::styled("⟳ ", Style::new().fg(ACCENT)));
+    r.push(Span::styled("⟳ ", Style::new().fg(th().accent)));
     if let Some(i) = app.scale_idx {
-        r.push(Span::styled(format!("{} ", SCALES[i].0), Style::new().fg(DIM)));
+        r.push(Span::styled(format!("{} ", SCALES[i].0), Style::new().fg(th().dim)));
     }
-    r.push(Span::styled(util::fmt_ms(app.interval.as_millis() as u64), Style::new().fg(FG)));
+    r.push(Span::styled(util::fmt_ms(app.interval.as_millis() as u64), Style::new().fg(th().fg)));
     r.push(sep());
-    r.push(Span::styled(app.line_mode.name(), Style::new().fg(DIM)));
+    r.push(Span::styled(app.line_mode.name(), Style::new().fg(th().dim)));
     r.push(sep());
-    r.push(Span::styled(format!("sort {sort}"), Style::new().fg(DIM)));
+    r.push(Span::styled(format!("sort {sort}"), Style::new().fg(th().dim)));
     r.push(sep());
-    r.push(Span::styled(util::clock(), Style::new().fg(FG)));
+    r.push(Span::styled(util::clock(), Style::new().fg(th().fg)));
     r.push(Span::raw(" "));
     f.render_widget(Paragraph::new(Line::from(r)).alignment(Alignment::Right), area);
 }
@@ -171,6 +192,134 @@ fn sort_arrow(app: &App) -> &'static str {
         "▾"
     } else {
         "▴"
+    }
+}
+
+// ------------------------------------------------------------------ world map
+
+/// 0.5° land bitmap, 720 × 360, lat 90 → -90, lon -180 → 180, one bit per
+/// cell, MSB first (rasterized from Natural Earth's public-domain 1:110m land).
+static LAND: &[u8; 32400] = include_bytes!("../assets/land.bin");
+/// Shown latitudes (Antarctica cropped).
+const MAP_N: f32 = 84.0;
+const MAP_S: f32 = -58.0;
+const MAP_ASPECT: f32 = 360.0 / (MAP_N - MAP_S);
+
+/// Blend two true colours (`t` of `b`); anything else just keeps `a`.
+fn mix(a: Color, b: Color, t: f64) -> Color {
+    match (a, b) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => lerp((r1, g1, b1), (r2, g2, b2), t),
+        _ => a,
+    }
+}
+
+fn land_at(lat: f32, lon: f32) -> bool {
+    let y = (((90.0 - lat) * 2.0) as i32).clamp(0, 359) as usize;
+    let x = (((lon + 180.0) * 2.0) as i32).rem_euclid(720) as usize;
+    let i = y * 720 + x;
+    LAND[i / 8] & (0x80 >> (i % 8)) != 0
+}
+
+/// Pixelated world map: land/sea in half-block pixels, each located host's
+/// traffic as a heat pixel (log scale), the selected host blinking.
+fn draw_map(f: &mut Frame, area: Rect, app: &App) {
+    let located = app.rows.iter().filter(|r| r.loc.is_some()).count();
+    let block = panel(Line::from(vec![
+        Span::raw(" "),
+        Span::styled("world", Style::new().fg(th().fg).bold()),
+        Span::styled(format!(" {located}/{} hosts ", app.rows.len()), Style::new().fg(th().dim)),
+    ]));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width < 8 || inner.height < 3 {
+        return;
+    }
+    let (pw, ph) = (inner.width as usize, inner.height as usize * 2);
+    // Degrees per pixel, same on both axes; centre the map.
+    let deg = (360.0 / pw as f32).max((MAP_N - MAP_S) / ph as f32);
+    let mw = ((360.0 / deg) as usize).min(pw);
+    let mh = (((MAP_N - MAP_S) / deg) as usize).min(ph);
+    let (ox, oy) = ((pw - mw) / 2, (ph - mh) / 2);
+    let to_px = |lat: f32, lon: f32| -> Option<(usize, usize)> {
+        if !(MAP_S..=MAP_N).contains(&lat) {
+            return None;
+        }
+        let x = (((lon + 180.0) / deg) as usize).min(mw - 1) + ox;
+        let y = (((MAP_N - lat) / deg) as usize).min(mh - 1) + oy;
+        Some((x, y))
+    };
+
+    // Land: a pixel is land if enough of its 3×3 samples are.
+    let mut px = vec![th().bg.unwrap_or(Color::Reset); pw * ph];
+    for y in 0..mh {
+        for x in 0..mw {
+            let mut n = 0;
+            for sy in 0..3 {
+                for sx in 0..3 {
+                    let lat = MAP_N - (y as f32 + (sy as f32 + 0.5) / 3.0) * deg;
+                    let lon = -180.0 + (x as f32 + (sx as f32 + 0.5) / 3.0) * deg;
+                    n += land_at(lat, lon) as u32;
+                }
+            }
+            px[(y + oy) * pw + x + ox] = if n >= 3 { th().land } else { th().sea };
+        }
+    }
+
+    // Traffic heat per pixel over the bar window.
+    let i = app.bar_interval;
+    let mut heat: HashMap<(usize, usize), f64> = HashMap::new();
+    for r in &app.rows {
+        if let Some((x, y)) = r.loc.and_then(|(la, lo)| to_px(la, lo)) {
+            *heat.entry((x, y)).or_default() += r.sent[i] + r.recv[i];
+        }
+    }
+    let max = heat.values().cloned().fold(0.0, f64::max).max(125.0);
+    let mut hot: Vec<((usize, usize), f64)> = heat
+        .into_iter()
+        .map(|(p, v)| (p, if v <= 1.0 { 0.0 } else { ((v / 125.0).max(1.0).log10() / (max / 125.0).log10().max(0.1)).clamp(0.0, 1.0) }))
+        .collect();
+    // Coolest first so the hottest pixel and glow win where they overlap.
+    hot.sort_by(|a, b| a.1.total_cmp(&b.1));
+    for &((x, y), t) in &hot {
+        // A soft glow on the four neighbours keeps single pixels visible.
+        let c = grad(Pal::Heat, t);
+        for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+            let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+            if nx >= 0 && ny >= 0 && (nx as usize) < pw && (ny as usize) < ph {
+                let i = ny as usize * pw + nx as usize;
+                px[i] = mix(px[i], c, 0.45);
+            }
+        }
+    }
+    for &((x, y), t) in &hot {
+        px[y * pw + x] = grad(Pal::Heat, t);
+    }
+    // Selected host, blinking.
+    let blink = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() / 400)
+        % 2
+        == 0;
+    if let Some((x, y)) = app.rows.get(app.selected).and_then(|r| r.loc).and_then(|(la, lo)| to_px(la, lo)) {
+        if blink {
+            px[y * pw + x] = th().bright;
+        }
+    }
+
+    let buf = f.buffer_mut();
+    for cy in 0..inner.height as usize {
+        for cx in 0..pw {
+            let (top, bot) = (px[2 * cy * pw + cx], px[(2 * cy + 1) * pw + cx]);
+            if let Some(c) = buf.cell_mut((inner.x + cx as u16, inner.y + cy as u16)) {
+                // Reset = no colour (letterbox, or the tty theme's sea): never
+                // draw it as a foreground block.
+                match (top == Color::Reset, bot == Color::Reset) {
+                    (true, true) => c.set_symbol(" "),
+                    (true, false) => c.set_symbol("▄").set_fg(bot),
+                    (false, _) => c.set_symbol("▀").set_fg(top).set_bg(bot),
+                };
+            }
+        }
     }
 }
 
@@ -263,54 +412,77 @@ fn graph_labels(buf: &mut Buffer, area: Rect, tmax: f64, bmax: f64, bytes: bool)
     if area.height < 2 {
         return;
     }
-    let s = Style::new().fg(DIM);
+    let s = Style::new().fg(th().dim);
     buf.set_string(area.x + 1, area.y, format!("↓ RX  {}/s", fmt_rate(tmax, bytes)), s);
     buf.set_string(area.x + 1, area.y + area.height - 1, format!("↑ TX  {}/s", fmt_rate(bmax, bytes)), s);
 }
 
 fn draw_graph(f: &mut Frame, area: Rect, app: &App) {
-    let [g, side] = Layout::horizontal([Constraint::Min(20), Constraint::Length(30)]).areas(area);
+    let [mut g, side] = Layout::horizontal([Constraint::Min(20), Constraint::Length(30)]).areas(area);
+    if app.map != MapMode::Off {
+        // Width that fits the map's aspect at this height (half-block pixels are square).
+        let want = (area.height.saturating_sub(2) as f32 * 2.0 * MAP_ASPECT) as u16 + 2;
+        let room_for_graph = app.show_graph && app.map == MapMode::Side && g.width >= want + 40;
+        let m = if room_for_graph {
+            let [rest, m] = Layout::horizontal([Constraint::Min(40), Constraint::Length(want)]).areas(g);
+            g = rest;
+            m
+        } else {
+            let m = g;
+            g = Rect::default();
+            m
+        };
+        draw_map(f, m, app);
+        if g.width == 0 {
+            let sb = panel(title("totals"));
+            f.render_widget(Paragraph::new(totals_lines(app)).block(sb), side);
+            return;
+        }
+    }
     let secs = (g.width.saturating_sub(2) as usize * 2).min(app.graph_rx.len()) * app.graph_step as usize;
     let block = panel(Line::from(vec![
         Span::raw(" "),
-        Span::styled("traffic", Style::new().fg(FG).bold()),
-        Span::styled(format!(" · last {} ", fmt_dur(secs)), Style::new().fg(DIM)),
+        Span::styled("traffic", Style::new().fg(th().fg).bold()),
+        Span::styled(format!(" · last {} ", fmt_dur(secs)), Style::new().fg(th().dim)),
     ]));
     let inner = block.inner(g);
     f.render_widget(block, g);
     let (tm, bm) = mirror_graph(f.buffer_mut(), inner, &app.graph_rx, &app.graph_tx);
     graph_labels(f.buffer_mut(), inner, tm, bm, app.bytes);
 
+    let sb = panel(title("totals"));
+    f.render_widget(Paragraph::new(totals_lines(app)).block(sb), side);
+}
+
+fn totals_lines(app: &App) -> Vec<Line<'static>> {
     let b = app.bytes;
     let win_label = format!("{}/{}s", app.windows[1], app.windows[2]);
     let kv = |k: &str, v: String, c: Color| {
         Line::from(vec![
-            Span::styled(format!("   {k:<8}"), Style::new().fg(DIM)),
+            Span::styled(format!("   {k:<8}"), Style::new().fg(th().dim)),
             Span::styled(format!("{v:>15}"), Style::new().fg(c)),
         ])
     };
-    let lines = vec![
+    vec![
         Line::from(vec![
-            Span::styled(format!(" ↓ RX {:<5}", format!("{}s", app.windows[0])), Style::new().fg(RX_C).bold()),
-            Span::styled(format!("{:>15}", fmt_rate(app.rates[0].1, b)), Style::new().fg(RX_C).bold()),
+            Span::styled(format!(" ↓ RX {:<5}", format!("{}s", app.windows[0])), Style::new().fg(th().rx).bold()),
+            Span::styled(format!("{:>15}", fmt_rate(app.rates[0].1, b)), Style::new().fg(th().rx).bold()),
         ]),
-        kv(&win_label, format!("{}/{}", fmt_rate(app.rates[1].1, b), fmt_rate(app.rates[2].1, b)), FG),
-        kv("peak", fmt_rate(app.peak.1, b), FG),
-        kv("total", fmt_bytes(app.totals.1), FG),
+        kv(&win_label, format!("{}/{}", fmt_rate(app.rates[1].1, b), fmt_rate(app.rates[2].1, b)), th().fg),
+        kv("peak", fmt_rate(app.peak.1, b), th().fg),
+        kv("total", fmt_bytes(app.totals.1), th().fg),
         Line::from(vec![
-            Span::styled(format!(" ↑ TX {:<5}", format!("{}s", app.windows[0])), Style::new().fg(TX_C).bold()),
-            Span::styled(format!("{:>15}", fmt_rate(app.rates[0].0, b)), Style::new().fg(TX_C).bold()),
+            Span::styled(format!(" ↑ TX {:<5}", format!("{}s", app.windows[0])), Style::new().fg(th().tx).bold()),
+            Span::styled(format!("{:>15}", fmt_rate(app.rates[0].0, b)), Style::new().fg(th().tx).bold()),
         ]),
-        kv(&win_label, format!("{}/{}", fmt_rate(app.rates[1].0, b), fmt_rate(app.rates[2].0, b)), FG),
-        kv("peak", fmt_rate(app.peak.0, b), FG),
-        kv("total", fmt_bytes(app.totals.0), FG),
+        kv(&win_label, format!("{}/{}", fmt_rate(app.rates[1].0, b), fmt_rate(app.rates[2].0, b)), th().fg),
+        kv("peak", fmt_rate(app.peak.0, b), th().fg),
+        kv("total", fmt_bytes(app.totals.0), th().fg),
         Line::from(vec![
-            Span::styled(format!(" {:.0} pkt/s", app.pps), Style::new().fg(DIM)),
-            Span::styled(format!("  {} flows", app.nflows), Style::new().fg(DIM)),
+            Span::styled(format!(" {:.0} pkt/s", app.pps), Style::new().fg(th().dim)),
+            Span::styled(format!("  {} flows", app.nflows), Style::new().fg(th().dim)),
         ]),
-    ];
-    let sb = panel(title("totals"));
-    f.render_widget(Paragraph::new(lines).block(sb), side);
+    ]
 }
 
 // ------------------------------------------------------------------ table
@@ -321,13 +493,13 @@ fn spark_line(buf: &mut Buffer, x: u16, y: u16, w: usize, data: &[u64]) {
     let d = &data[data.len().saturating_sub(w)..];
     let max = d.iter().copied().max().unwrap_or(0);
     if max == 0 {
-        buf.set_string(x, y, "·".repeat(d.len()), Style::new().fg(BORDER));
+        buf.set_string(x, y, "·".repeat(d.len()), Style::new().fg(th().border));
         return;
     }
     for (i, v) in d.iter().enumerate() {
         let lvl = if *v == 0 { 0 } else { ((*v as f64 / max as f64) * 8.0).ceil() as usize }.min(8);
         let (ch, c) = if lvl == 0 {
-            ('·', BORDER)
+            ('·', th().border)
         } else {
             (SPARK_CH[lvl], grad(Pal::Rx, lvl as f64 / 8.0))
         };
@@ -403,8 +575,8 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
     let n = app.rows.len();
     let block = panel(Line::from(vec![
         Span::raw(" "),
-        Span::styled("hosts", Style::new().fg(FG).bold()),
-        Span::styled(format!(" {n} "), Style::new().fg(DIM)),
+        Span::styled("hosts", Style::new().fg(th().fg).bold()),
+        Span::styled(format!(" {n} "), Style::new().fg(th().dim)),
     ]))
     .title_bottom(Line::from(vec![Span::styled(
         format!(
@@ -413,7 +585,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
             if app.log_scale { "log" } else { "lin" },
             if app.bytes { "bytes" } else { "bits" }
         ),
-        Style::new().fg(DIM),
+        Style::new().fg(th().dim),
     )]).right_aligned());
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -424,8 +596,8 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
     let buf = f.buffer_mut();
 
     // header line; every column header is clickable to sort by it
-    let hs = Style::new().fg(DIM).add_modifier(Modifier::BOLD);
-    let on = Style::new().fg(ACCENT).bold().underlined();
+    let hs = Style::new().fg(th().dim).add_modifier(Modifier::BOLD);
+    let on = Style::new().fg(th().accent).bold().underlined();
     let arrow = sort_arrow(app);
     let mut hits = Vec::new();
     let mut head = |buf: &mut Buffer, x: u16, w: usize, text: &str, s: Sort, right: bool| {
@@ -477,7 +649,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
 
     if n == 0 {
         let msg = if app.capture_error.is_some() { "capture stopped" } else { "waiting for traffic…" };
-        buf.set_string(c.label_x, inner.y + 2, msg, Style::new().fg(DIM).italic());
+        buf.set_string(c.label_x, inner.y + 2, msg, Style::new().fg(th().dim).italic());
         return;
     }
 
@@ -488,7 +660,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
         let sel = idx == app.selected;
         let row_rect = Rect::new(inner.x, y, inner.width, lines_per as u16);
         if sel {
-            buf.set_style(row_rect, Style::new().bg(SEL_BG));
+            buf.set_style(row_rect, Style::new().bg(th().sel_bg));
         }
         // bars
         if app.show_bars {
@@ -499,32 +671,32 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
                     let tot = r.sent[i] + r.recv[i];
                     let w = (bar_frac(app, tot) * bw).round() as u16;
                     let wr = if tot > 0.0 { (w as f64 * r.recv[i] / tot).round() as u16 } else { 0 };
-                    buf.set_style(Rect::new(c.label_x, y, wr, 1), Style::new().bg(RX_BAR));
-                    buf.set_style(Rect::new(c.label_x + wr, y, w - wr, 1), Style::new().bg(TX_BAR));
+                    buf.set_style(Rect::new(c.label_x, y, wr, 1), Style::new().bg(th().rx_bar));
+                    buf.set_style(Rect::new(c.label_x + wr, y, w - wr, 1), Style::new().bg(th().tx_bar));
                 }
                 LineMode::Two => {
                     let ws = (bar_frac(app, r.sent[i]) * bw).round() as u16;
                     let wr = (bar_frac(app, r.recv[i]) * bw).round() as u16;
-                    buf.set_style(Rect::new(c.label_x, y, ws, 1), Style::new().bg(TX_BAR));
-                    buf.set_style(Rect::new(c.label_x, y + 1, wr, 1), Style::new().bg(RX_BAR));
+                    buf.set_style(Rect::new(c.label_x, y, ws, 1), Style::new().bg(th().tx_bar));
+                    buf.set_style(Rect::new(c.label_x, y + 1, wr, 1), Style::new().bg(th().rx_bar));
                 }
                 LineMode::Sent => {
                     let w = (bar_frac(app, r.sent[i]) * bw).round() as u16;
-                    buf.set_style(Rect::new(c.label_x, y, w, 1), Style::new().bg(TX_BAR));
+                    buf.set_style(Rect::new(c.label_x, y, w, 1), Style::new().bg(th().tx_bar));
                 }
                 LineMode::Recv => {
                     let w = (bar_frac(app, r.recv[i]) * bw).round() as u16;
-                    buf.set_style(Rect::new(c.label_x, y, w, 1), Style::new().bg(RX_BAR));
+                    buf.set_style(Rect::new(c.label_x, y, w, 1), Style::new().bg(th().rx_bar));
                 }
             }
         }
         if sel {
-            buf.set_string(inner.x, y, "▌", Style::new().fg(ACCENT));
+            buf.set_string(inner.x, y, "▌", Style::new().fg(th().accent));
         }
-        let text = if sel { Style::new().fg(Color::White).bold() } else { Style::new().fg(FG) };
+        let text = if sel { Style::new().fg(th().bright).bold() } else { Style::new().fg(th().fg) };
         let num = |v: f64| {
             if v < 0.5 {
-                Style::new().fg(BORDER)
+                Style::new().fg(th().border)
             } else {
                 text
             }
@@ -541,7 +713,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
         };
         buf.set_stringn(c.label_x, y, pair_label(app, r, c.label_w, arrow1, true), c.label_w, text);
         if c.geo_w > 0 {
-            buf.set_stringn(c.geo_x, y, fit(&r.geo, c.geo_w), c.geo_w, Style::new().fg(DIM));
+            buf.set_stringn(c.geo_x, y, fit(&r.geo, c.geo_w), c.geo_w, Style::new().fg(th().dim));
         }
         if c.spark_w > 0 {
             spark_line(buf, c.spark_x, y, c.spark_w, &r.spark);
@@ -550,17 +722,17 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
             buf.set_string(c.num_x + (i * c.num_w) as u16, y, format!("{:>w$}", fmt_rate(*v, b), w = c.num_w), num(*v));
         }
         if app.show_totals {
-            buf.set_string(c.num_x + (3 * c.num_w) as u16, y, format!("{:>w$}", fmt_bytes(tot1), w = c.num_w), Style::new().fg(DIM));
+            buf.set_string(c.num_x + (3 * c.num_w) as u16, y, format!("{:>w$}", fmt_bytes(tot1), w = c.num_w), Style::new().fg(th().dim));
         }
         app.row_hits.push((y, idx));
         if app.line_mode == LineMode::Two {
             let y2 = y + 1;
-            buf.set_stringn(c.label_x, y2, pair_label(app, r, c.label_w, "←", false), c.label_w, Style::new().fg(DIM));
+            buf.set_stringn(c.label_x, y2, pair_label(app, r, c.label_w, "←", false), c.label_w, Style::new().fg(th().dim));
             for (i, v) in r.recv.iter().enumerate() {
                 buf.set_string(c.num_x + (i * c.num_w) as u16, y2, format!("{:>w$}", fmt_rate(*v, b), w = c.num_w), num(*v));
             }
             if app.show_totals {
-                buf.set_string(c.num_x + (3 * c.num_w) as u16, y2, format!("{:>w$}", fmt_bytes(r.tot_recv), w = c.num_w), Style::new().fg(DIM));
+                buf.set_string(c.num_x + (3 * c.num_w) as u16, y2, format!("{:>w$}", fmt_bytes(r.tot_recv), w = c.num_w), Style::new().fg(th().dim));
             }
             app.row_hits.push((y2, idx));
         }
@@ -569,7 +741,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
     if n > visible {
         let pos = format!(" {}-{}/{} ", app.offset + 1, (app.offset + visible).min(n), n);
         let x = area.x + area.width.saturating_sub(pos.len() as u16 + 2);
-        buf.set_string(x, area.y, pos, Style::new().fg(DIM));
+        buf.set_string(x, area.y, pos, Style::new().fg(th().dim));
     }
 }
 
@@ -585,16 +757,16 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
             ),
         };
         let l = Line::from(vec![
-            Span::styled(format!(" {p} "), Style::new().bg(ACCENT).fg(Color::Black).bold()),
+            Span::styled(format!(" {p} "), Style::new().bg(th().accent).fg(th().on_accent).bold()),
             Span::raw(" "),
-            Span::styled(app.input_buf.clone(), Style::new().fg(Color::White).bold()),
-            Span::styled("█", Style::new().fg(ACCENT)),
-            Span::styled(format!("   {hint}"), Style::new().fg(DIM)),
+            Span::styled(app.input_buf.clone(), Style::new().fg(th().bright).bold()),
+            Span::styled("█", Style::new().fg(th().accent)),
+            Span::styled(format!("   {hint}"), Style::new().fg(th().dim)),
         ]);
         f.render_widget(Paragraph::new(l), area);
         if let Some(s) = app.status() {
             f.render_widget(
-                Paragraph::new(Span::styled(format!("{s} "), Style::new().fg(WARN))).alignment(Alignment::Right),
+                Paragraph::new(Span::styled(format!("{s} "), Style::new().fg(th().warn))).alignment(Alignment::Right),
                 area,
             );
         }
@@ -625,19 +797,21 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
             ("s/d", "aggr"),
             ("e/E", "hide/only"),
             ("G", "geo"),
+            ("m", "map"),
+            ("c", "theme"),
             ("P", "pause"),
             ("q", "quit"),
         ]
     };
     let mut spans = vec![Span::raw(" ")];
     for (k, d) in keys {
-        spans.push(Span::styled(k.to_string(), Style::new().fg(ACCENT).bold()));
-        spans.push(Span::styled(format!(" {d}  "), Style::new().fg(DIM)));
+        spans.push(Span::styled(k.to_string(), Style::new().fg(th().accent).bold()));
+        spans.push(Span::styled(format!(" {d}  "), Style::new().fg(th().dim)));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
     if let Some(s) = app.status() {
         f.render_widget(
-            Paragraph::new(Span::styled(format!(" {s} "), Style::new().bg(SEL_BG).fg(WARN).bold()))
+            Paragraph::new(Span::styled(format!(" {s} "), Style::new().bg(th().sel_bg).fg(th().warn).bold()))
                 .alignment(Alignment::Right),
             area,
         );
@@ -688,6 +862,8 @@ fn draw_help(f: &mut Frame, area: Rect) {
                 ("y / Y", "copy IP / hostname to the clipboard"),
                 ("G", "geo (table + traceroute): AS+org → org → AS → city → city+AS → off"),
                 ("g", "toggle traffic graph"),
+                ("m", "world map: off → beside the graph → big"),
+                ("c", "colour theme: tokyo-night, dracula, nord, gruvbox, …"),
                 ("+ / -", "time scale: update 1/2/5/10 s, averages 1/5/20 … 10/60/300 s"),
                 ("u", "bits ↔ bytes"),
                 ("r", "reset statistics"),
@@ -707,11 +883,11 @@ fn draw_help(f: &mut Frame, area: Rect) {
     ];
     let mut lines = Vec::new();
     for (name, keys) in sections {
-        lines.push(Line::from(Span::styled(format!(" {name}"), Style::new().fg(ACCENT).bold())));
+        lines.push(Line::from(Span::styled(format!(" {name}"), Style::new().fg(th().accent).bold())));
         for (k, d) in keys.iter() {
             lines.push(Line::from(vec![
-                Span::styled(format!("   {k:<15}"), Style::new().fg(WARN)),
-                Span::styled(d.to_string(), Style::new().fg(FG)),
+                Span::styled(format!("   {k:<15}"), Style::new().fg(th().warn)),
+                Span::styled(d.to_string(), Style::new().fg(th().fg)),
             ]));
         }
         lines.push(Line::raw(""));
@@ -746,7 +922,7 @@ fn draw_ifaces(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(block, r);
     app.popup_hits.clear();
     let buf = f.buffer_mut();
-    let hs = Style::new().fg(DIM).bold();
+    let hs = Style::new().fg(th().dim).bold();
     buf.set_string(inner.x + 2, inner.y, format!("{:<16} {:<8} {:>9} {:>9}  addresses", "name", "state", "↓ rx", "↑ tx"), hs);
     for (i, e) in app.ifaces.iter().enumerate().skip(app.iface_off) {
         let y = inner.y + 1 + (i - app.iface_off) as u16;
@@ -756,23 +932,23 @@ fn draw_ifaces(f: &mut Frame, area: Rect, app: &mut App) {
         app.popup_hits.push((y, i));
         let sel = i == app.iface_sel;
         if sel {
-            buf.set_style(Rect::new(inner.x, y, inner.width, 1), Style::new().bg(SEL_BG));
-            buf.set_string(inner.x, y, "▌", Style::new().fg(ACCENT));
+            buf.set_style(Rect::new(inner.x, y, inner.width, 1), Style::new().bg(th().sel_bg));
+            buf.set_string(inner.x, y, "▌", Style::new().fg(th().accent));
         }
         let cur = e.name == app.iface;
-        let name_style = if cur { Style::new().fg(ACCENT).bold() } else { Style::new().fg(FG) };
+        let name_style = if cur { Style::new().fg(th().accent).bold() } else { Style::new().fg(th().fg) };
         let st_style = match e.state.as_str() {
-            "up" => Style::new().fg(RX_C),
-            "down" => Style::new().fg(ERR),
-            _ => Style::new().fg(DIM),
+            "up" => Style::new().fg(th().rx),
+            "down" => Style::new().fg(th().err),
+            _ => Style::new().fg(th().dim),
         };
         let addrs: Vec<String> = e.addrs.iter().map(|a| a.to_string()).collect();
         buf.set_string(inner.x + 2, y, format!("{:<16} ", fit(&e.name, 16)), name_style);
         buf.set_string(inner.x + 19, y, format!("{:<8} ", fit(&e.state, 8)), st_style);
-        buf.set_string(inner.x + 28, y, format!("{:>9}", fmt_rate(e.rx, app.bytes)), Style::new().fg(RX_C));
-        buf.set_string(inner.x + 38, y, format!("{:>9}", fmt_rate(e.tx, app.bytes)), Style::new().fg(TX_C));
+        buf.set_string(inner.x + 28, y, format!("{:>9}", fmt_rate(e.rx, app.bytes)), Style::new().fg(th().rx));
+        buf.set_string(inner.x + 38, y, format!("{:>9}", fmt_rate(e.tx, app.bytes)), Style::new().fg(th().tx));
         let aw = inner.width.saturating_sub(50) as usize;
-        buf.set_stringn(inner.x + 50, y, addrs.join(" "), aw, Style::new().fg(DIM));
+        buf.set_stringn(inner.x + 50, y, addrs.join(" "), aw, Style::new().fg(th().dim));
     }
 }
 
@@ -794,18 +970,18 @@ fn draw_sort(f: &mut Frame, area: Rect, app: &mut App) {
         }
         app.popup_hits.push((y, i));
         if i == app.sort_sel {
-            buf.set_style(Rect::new(inner.x, y, inner.width, 1), Style::new().bg(SEL_BG));
-            buf.set_string(inner.x, y, "▌", Style::new().fg(ACCENT));
+            buf.set_style(Rect::new(inner.x, y, inner.width, 1), Style::new().bg(th().sel_bg));
+            buf.set_string(inner.x, y, "▌", Style::new().fg(th().accent));
         }
         let cur = *s == app.sort;
-        let st = if cur { Style::new().fg(ACCENT).bold() } else { Style::new().fg(FG) };
+        let st = if cur { Style::new().fg(th().accent).bold() } else { Style::new().fg(th().fg) };
         let key = match s {
             Sort::Col(k) => format!("{}", k + 1),
             Sort::Src => "<".into(),
             Sort::Dst => ">".into(),
             _ => String::new(),
         };
-        buf.set_string(inner.x + 2, y, format!("{key:>1}"), Style::new().fg(WARN));
+        buf.set_string(inner.x + 2, y, format!("{key:>1}"), Style::new().fg(th().warn));
         let mark = if cur { format!(" {arrow}") } else { String::new() };
         buf.set_stringn(inner.x + 5, y, format!("{}{mark}", s.label(&app.windows)), inner.width.saturating_sub(6) as usize, st);
     }
@@ -830,12 +1006,12 @@ fn draw_host(f: &mut Frame, area: Rect, app: &App) {
     let name = if app.dns { app.resolver.lookup(&h.ip) } else { None };
     let mut t = vec![
         Span::raw(" "),
-        Span::styled(h.ip.to_string(), Style::new().fg(ACCENT).bold()),
+        Span::styled(h.ip.to_string(), Style::new().fg(th().accent).bold()),
     ];
     if let Some(n) = &name {
-        t.push(Span::styled(format!("  {n}"), Style::new().fg(FG)));
+        t.push(Span::styled(format!("  {n}"), Style::new().fg(th().fg)));
     }
-    t.push(Span::styled(if h.local { "  local side" } else { "  remote side" }, Style::new().fg(DIM)));
+    t.push(Span::styled(if h.local { "  local side" } else { "  remote side" }, Style::new().fg(th().dim)));
     t.push(Span::raw(" "));
     let block = panel(Line::from(t)).title_bottom(
         Line::from(" esc back · j/k prev/next · tab/l local↔remote · e/E hide/only · y/Y copy · G geo · r restart ").right_aligned(),
@@ -850,36 +1026,36 @@ fn draw_host(f: &mut Frame, area: Rect, app: &App) {
     // --- info
     let geo = app.geo.lookup(&h.ip);
     let kv = |k: &str, v: String, c: Color| {
-        Line::from(vec![Span::styled(format!(" {k:<9}"), Style::new().fg(DIM)), Span::styled(v, Style::new().fg(c))])
+        Line::from(vec![Span::styled(format!(" {k:<9}"), Style::new().fg(th().dim)), Span::styled(v, Style::new().fg(c))])
     };
     let internal = crate::filter::is_internal(&h.ip, &app.stats.lock().unwrap().filter.internal_nets);
     let mut lines = vec![
-        kv("address", h.ip.to_string(), FG),
-        kv("name", name.clone().unwrap_or_else(|| if app.dns { "…".into() } else { "(dns off)".into() }), FG),
-        kv("scope", if internal { "internal".into() } else { "external".into() }, if internal { ACCENT } else { WARN }),
+        kv("address", h.ip.to_string(), th().fg),
+        kv("name", name.clone().unwrap_or_else(|| if app.dns { "…".into() } else { "(dns off)".into() }), th().fg),
+        kv("scope", if internal { "internal".into() } else { "external".into() }, if internal { th().accent } else { th().warn }),
     ];
     match &geo {
         Some(g) => {
             if !g.place().is_empty() {
-                lines.push(kv("location", g.place(), RX_C));
+                lines.push(kv("location", g.place(), th().rx));
             }
             if !g.as_text().is_empty() {
-                lines.push(kv("ASN", g.as_text(), TX_C));
+                lines.push(kv("ASN", g.as_text(), th().tx));
             }
             if let Some(n) = &g.net {
-                lines.push(kv("network", n.clone(), DIM));
+                lines.push(kv("network", n.clone(), th().dim));
             }
         }
-        None => lines.push(kv("geo", if app.geo.available() { "unknown".into() } else { "no GeoIP db".into() }, DIM)),
+        None => lines.push(kv("geo", if app.geo.available() { "unknown".into() } else { "no GeoIP db".into() }, th().dim)),
     }
-    lines.push(kv("traffic", format!("↓ {}  ↑ {}", fmt_bytes(h.totals.1), fmt_bytes(h.totals.0)), FG));
+    lines.push(kv("traffic", format!("↓ {}  ↑ {}", fmt_bytes(h.totals.1), fmt_bytes(h.totals.0)), th().fg));
     f.render_widget(Paragraph::new(lines).block(panel(title("host"))), info);
 
     // --- traffic graph
     let tb = panel(Line::from(vec![
         Span::raw(" "),
-        Span::styled("traffic", Style::new().fg(FG).bold()),
-        Span::styled(format!(" ↓ {}  ↑ {} ", fmt_rate(h.rate.1, app.bytes), fmt_rate(h.rate.0, app.bytes)), Style::new().fg(DIM)),
+        Span::styled("traffic", Style::new().fg(th().fg).bold()),
+        Span::styled(format!(" ↓ {}  ↑ {} ", fmt_rate(h.rate.1, app.bytes), fmt_rate(h.rate.0, app.bytes)), Style::new().fg(th().dim)),
     ]));
     let ti = tb.inner(traffic);
     f.render_widget(tb, traffic);
@@ -888,13 +1064,13 @@ fn draw_host(f: &mut Frame, area: Rect, app: &App) {
 
     // --- ping
     let st = h.probe.state.lock().unwrap();
-    let mut pt = vec![Span::raw(" "), Span::styled("ping", Style::new().fg(FG).bold()), Span::raw(" ")];
+    let mut pt = vec![Span::raw(" "), Span::styled("ping", Style::new().fg(th().fg).bold()), Span::raw(" ")];
     if let Some((last, min, avg, max)) = st.rtt_stats() {
         pt.push(Span::styled(format!("{last:.1} ms", ), Style::new().fg(rtt_color(last)).bold()));
-        pt.push(Span::styled(format!("  min {min:.1}  avg {avg:.1}  max {max:.1}"), Style::new().fg(DIM)));
+        pt.push(Span::styled(format!("  min {min:.1}  avg {avg:.1}  max {max:.1}"), Style::new().fg(th().dim)));
     }
     if let Some(loss) = st.loss() {
-        let c = if loss > 0.0 { ERR } else { RX_C };
+        let c = if loss > 0.0 { th().err } else { th().rx };
         pt.push(Span::styled(format!("  loss {loss:.0}%"), Style::new().fg(c)));
     }
     pt.push(Span::raw(" "));
@@ -904,9 +1080,9 @@ fn draw_host(f: &mut Frame, area: Rect, app: &App) {
     {
         let buf = f.buffer_mut();
         if let Some(e) = &st.ping_err {
-            buf.set_string(pi.x + 1, pi.y, e, Style::new().fg(ERR));
+            buf.set_string(pi.x + 1, pi.y, e, Style::new().fg(th().err));
         } else if st.replies.is_empty() {
-            buf.set_string(pi.x + 1, pi.y, if st.max_seq > 2 { "no replies" } else { "pinging…" }, Style::new().fg(DIM).italic());
+            buf.set_string(pi.x + 1, pi.y, if st.max_seq > 2 { "no replies" } else { "pinging…" }, Style::new().fg(th().dim).italic());
         } else {
             // bar per probe, newest right; missing seqs shown as red '×'
             let w = pi.width as usize;
@@ -931,7 +1107,7 @@ fn draw_host(f: &mut Frame, area: Rect, app: &App) {
                     }
                     None if seq < maxseq => {
                         if let Some(c) = buf.cell_mut((x, pi.y + pi.height - 1)) {
-                            c.set_char('×').set_fg(ERR);
+                            c.set_char('×').set_fg(th().err);
                         }
                     }
                     None => {}
@@ -941,12 +1117,12 @@ fn draw_host(f: &mut Frame, area: Rect, app: &App) {
     }
 
     // --- traceroute
-    let mut tt = vec![Span::raw(" "), Span::styled("traceroute", Style::new().fg(FG).bold())];
+    let mut tt = vec![Span::raw(" "), Span::styled("traceroute", Style::new().fg(th().fg).bold())];
     if !st.trace_tool.is_empty() {
-        tt.push(Span::styled(format!(" ({})", st.trace_tool), Style::new().fg(DIM)));
+        tt.push(Span::styled(format!(" ({})", st.trace_tool), Style::new().fg(th().dim)));
     }
     if !st.trace_done {
-        tt.push(Span::styled(" running…", Style::new().fg(WARN)));
+        tt.push(Span::styled(" running…", Style::new().fg(th().warn)));
     }
     tt.push(Span::raw(" "));
     let trb = panel(Line::from(tt));
@@ -958,7 +1134,7 @@ fn draw_host(f: &mut Frame, area: Rect, app: &App) {
     {
         let buf = f.buffer_mut();
         if let Some(e) = trace_err {
-            buf.set_string(tri.x + 1, tri.y, e, Style::new().fg(ERR));
+            buf.set_string(tri.x + 1, tri.y, e, Style::new().fg(th().err));
         }
         let w = tri.width as usize;
         // With geo off the hostname takes the whole remaining width.
@@ -968,27 +1144,27 @@ fn draw_host(f: &mut Frame, area: Rect, app: &App) {
         for (i, hop) in hops.iter().enumerate().take(tri.height as usize) {
             let y = tri.y + i as u16;
             let mut x = tri.x + 1;
-            buf.set_string(x, y, format!("{:>2}", hop.ttl), Style::new().fg(DIM));
+            buf.set_string(x, y, format!("{:>2}", hop.ttl), Style::new().fg(th().dim));
             x += 3;
             match hop.ip {
                 None => {
-                    buf.set_string(x, y, "*", Style::new().fg(DIM));
+                    buf.set_string(x, y, "*", Style::new().fg(th().dim));
                 }
                 Some(ip) => {
                     let is_target = ip == h.ip;
-                    let st = if is_target { Style::new().fg(ACCENT).bold() } else { Style::new().fg(FG) };
+                    let st = if is_target { Style::new().fg(th().accent).bold() } else { Style::new().fg(th().fg) };
                     buf.set_stringn(x, y, ip.to_string(), 16, st);
                     x += 17;
                     let rtt = hop.rtt.map(|r| format!("{r:>6.1}ms")).unwrap_or_default();
-                    buf.set_string(x, y, &rtt, Style::new().fg(hop.rtt.map(rtt_color).unwrap_or(DIM)));
+                    buf.set_string(x, y, &rtt, Style::new().fg(hop.rtt.map(rtt_color).unwrap_or(th().dim)));
                     x += 9;
                     let nm = if app.dns { app.resolver.lookup(&ip).unwrap_or_default() } else { String::new() };
-                    buf.set_stringn(x, y, fit(&nm, name_w), name_w, Style::new().fg(DIM));
+                    buf.set_stringn(x, y, fit(&nm, name_w), name_w, Style::new().fg(th().dim));
                     x += name_w as u16 + 1;
                     if geo_w > 0 {
                         if let Some(g) = app.geo.lookup(&ip) {
                             let s = app.geo_fmt.render(&g);
-                            buf.set_stringn(x, y, fit(&s, geo_w), geo_w, Style::new().fg(TX_C));
+                            buf.set_stringn(x, y, fit(&s, geo_w), geo_w, Style::new().fg(th().tx));
                         }
                     }
                 }
@@ -999,8 +1175,8 @@ fn draw_host(f: &mut Frame, area: Rect, app: &App) {
     // --- flows
     let fb = panel(Line::from(vec![
         Span::raw(" "),
-        Span::styled("flows", Style::new().fg(FG).bold()),
-        Span::styled(format!(" {} ", h.flows.len()), Style::new().fg(DIM)),
+        Span::styled("flows", Style::new().fg(th().fg).bold()),
+        Span::styled(format!(" {} ", h.flows.len()), Style::new().fg(th().dim)),
     ]));
     let fi = fb.inner(flows);
     f.render_widget(fb, flows);
@@ -1022,11 +1198,11 @@ fn draw_host(f: &mut Frame, area: Rect, app: &App) {
             util::proto_name(k.proto)
         };
         let dw = fi.width.saturating_sub(30) as usize;
-        buf.set_stringn(fi.x + 1, y, fit(&desc, dw), dw, Style::new().fg(FG));
+        buf.set_stringn(fi.x + 1, y, fit(&desc, dw), dw, Style::new().fg(th().fg));
         let x = fi.x + 1 + dw as u16;
-        buf.set_string(x, y, format!("{:>8}", fmt_rate(*rr, app.bytes)), Style::new().fg(RX_C));
-        buf.set_string(x + 9, y, format!("{:>8}", fmt_rate(*s, app.bytes)), Style::new().fg(TX_C));
-        buf.set_string(x + 18, y, format!("{:>9}", fmt_bytes(*tot)), Style::new().fg(DIM));
+        buf.set_string(x, y, format!("{:>8}", fmt_rate(*rr, app.bytes)), Style::new().fg(th().rx));
+        buf.set_string(x + 9, y, format!("{:>8}", fmt_rate(*s, app.bytes)), Style::new().fg(th().tx));
+        buf.set_string(x + 18, y, format!("{:>9}", fmt_bytes(*tot)), Style::new().fg(th().dim));
     }
 }
 

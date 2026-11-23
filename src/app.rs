@@ -140,6 +140,14 @@ fn none_last<T: Ord>(a: &Option<T>, b: &Option<T>, rev: bool) -> std::cmp::Order
     }
 }
 
+/// World map (`m`): off, a panel beside the graph, or a big one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MapMode {
+    Off,
+    Side,
+    Big,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum InputKind {
     Search,
@@ -170,6 +178,7 @@ pub struct Row {
     pub geo: String,
     pub asn: Option<u32>,
     pub cc: Option<String>,
+    pub loc: Option<(f32, f32)>,
     pub sent: [f64; 3],
     pub recv: [f64; 3],
     pub tot_sent: u64,
@@ -187,6 +196,7 @@ impl Row {
             geo: String::new(),
             asn: None,
             cc: None,
+            loc: None,
             sent: [0.0; 3],
             recv: [0.0; 3],
             tot_sent: 0,
@@ -263,6 +273,7 @@ pub struct App {
     pub bytes: bool,
     // extras
     pub show_graph: bool,
+    pub map: MapMode,
     pub geo_fmt: GeoFmt,
     /// Host panel targets the local side of the selected row instead of the remote one.
     pub host_local: bool,
@@ -342,6 +353,11 @@ impl App {
         let sort = Sort::parse(&args.order).ok_or_else(|| {
             anyhow::anyhow!("--order: expected 1, 2, 3, sent, recv, total, flows, source, destination, ip, asn or country")
         })?;
+        if let Some(t) = &args.theme {
+            let i = crate::theme::find(t)
+                .ok_or_else(|| anyhow::anyhow!("--theme: expected one of {}", crate::theme::names()))?;
+            crate::theme::set(i);
+        }
         let line_mode = match args.lines.as_str() {
             "two" => LineMode::Two,
             "sent" => LineMode::Sent,
@@ -405,6 +421,7 @@ impl App {
             log_scale: true,
             bytes: args.bytes,
             show_graph: true,
+            map: MapMode::Off,
             windows,
             interval,
             peak_slot: 0,
@@ -714,6 +731,7 @@ impl App {
                 r.geo = self.geo_fmt.render(&g);
                 r.asn = g.asn;
                 r.cc = g.cc;
+                r.loc = g.loc;
             }
         }
         if !self.search.is_empty() {
@@ -1336,6 +1354,22 @@ impl App {
             KeyCode::Char('+') | KeyCode::Char('=') => self.step_scale(1),
             KeyCode::Char('-') | KeyCode::Char('_') => self.step_scale(-1),
             KeyCode::Char('G') => self.cycle_geo(),
+            KeyCode::Char('m') => {
+                self.map = match self.map {
+                    MapMode::Off => MapMode::Side,
+                    MapMode::Side => MapMode::Big,
+                    MapMode::Big => MapMode::Off,
+                };
+                if self.map != MapMode::Off && !self.geo.available() {
+                    self.flash("the map needs a GeoIP City database (--geoip DIR)");
+                } else {
+                    self.flash(format!("map: {}", format!("{:?}", self.map).to_lowercase()));
+                }
+            }
+            KeyCode::Char('c') => {
+                crate::theme::set(crate::theme::index() + 1);
+                self.flash(format!("theme: {}", crate::theme::th().name));
+            }
             KeyCode::Char('e') => self.quick_filter(false),
             KeyCode::Char('E') => self.quick_filter(true),
             KeyCode::Char('y') => self.copy_host(false),

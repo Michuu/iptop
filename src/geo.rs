@@ -19,7 +19,14 @@ struct Named {
 }
 
 #[derive(Deserialize)]
+struct Location {
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+}
+
+#[derive(Deserialize)]
 struct Rec {
+    location: Option<Location>,
     country: Option<Named>,
     registered_country: Option<Named>,
     city: Option<Named>,
@@ -36,6 +43,8 @@ pub struct GeoInfo {
     pub as_org: Option<String>,
     /// Network block of the lookup, e.g. "142.250.0.0/15" (from the ASN db if present).
     pub net: Option<String>,
+    /// (latitude, longitude) from a City database.
+    pub loc: Option<(f32, f32)>,
 }
 
 impl GeoInfo {
@@ -286,6 +295,11 @@ impl Geo {
             if g.city.is_none() {
                 g.city = rec.city.and_then(|c| c.names).and_then(|n| n.en);
             }
+            if g.loc.is_none() {
+                if let Some(Location { latitude: Some(la), longitude: Some(lo) }) = rec.location {
+                    g.loc = Some((la as f32, lo as f32));
+                }
+            }
             if g.asn.is_none() {
                 g.asn = rec.autonomous_system_number;
             }
@@ -335,6 +349,7 @@ mod tests {
             asn: Some(8501),
             as_org: Some("PSNC".into()),
             net: None,
+            loc: None,
         };
         assert_eq!(GeoFmt::Short.render(&g), "PL AS8501 PSNC");
         assert_eq!(GeoFmt::Org.render(&g), "PL PSNC");
